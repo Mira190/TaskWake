@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/src/hook.js", "ralph"],
+        "timeout": 10
+      }]
+    }],
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/src/hook.js", "session-start"],
+        "timeout": 10
+      }]
+    }],
+    "SessionEnd": [{
+      "hooks": [{
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/src/hook.js", "session-end"],
+        "timeout": 10
+      }]
+    }],
+    "StopFailure": [{
+      "matcher": "rate_limit|overloaded|server_error",
+      "hooks": [{
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PLUGIN_ROOT}/src/hook.js"],
+        "timeout": 10
+      }]
+    }]
+  }
+}

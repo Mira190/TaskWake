@@ -1,0 +1,12 @@
+{
+  "name": "taskwake",
+  "description": "Keep AI coding agents moving across usage resets and completed tasks",
+  "owner": { "name": "Mira" },
+  "plugins": [
+    {
+      "name": "taskwake",
+      "source": "./",
+      "description": "Automatic Claude Code recovery, bounded autonomous continuation, and local session visibility"
+    }
+  ]
+}

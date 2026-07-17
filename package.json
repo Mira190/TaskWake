@@ -1,0 +1,15 @@
+{
+  "name": "taskwake",
+  "version": "1.0.0",
+  "description": "Keep Claude Code and Codex moving across usage resets and completed tasks",
+  "type": "module",
+  "bin": {
+    "taskwake": "./bin/taskwake.js",
+    "rewake": "./bin/taskwake.js"
+  },
+  "scripts": { "test": "node --test test/" },
+  "engines": { "node": ">=20" },
+  "license": "MIT",
+  "keywords": ["claude-code", "codex", "agent", "auto-resume", "rate-limit", "ralph-loop"],
+  "files": ["bin/", "src/", "hooks/", "commands/", ".claude-plugin/", "README.md", "LICENSE"]
+}

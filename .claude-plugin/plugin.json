@@ -1,0 +1,8 @@
+{
+  "name": "taskwake",
+  "version": "1.0.0",
+  "description": "Keep Claude Code moving across usage resets and completed tasks",
+  "author": { "name": "Mira" },
+  "license": "MIT",
+  "keywords": ["claude-code", "codex", "agent", "auto-resume", "ralph-loop"]
+}

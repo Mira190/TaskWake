@@ -1,0 +1,18 @@
+[
+  { "text": "You've hit your session limit · resets 6:50pm (Europe/London)", "kind": "usage", "parses": true },
+  { "text": "You've hit your session limit · resets 12:10am (Europe/Dublin)", "kind": "usage", "parses": true },
+  { "text": "5-hour limit reached - resets 3pm", "kind": "usage", "parses": true },
+  { "text": "Claude usage limit reached. Resets at 2pm", "kind": "usage", "parses": true },
+  { "text": "You're out of extra usage · resets 3pm", "kind": "usage", "parses": true },
+  { "text": "Please try again in 5 hours", "kind": "usage", "parses": true },
+  { "text": "Rate limit hit. Resets at 4pm", "kind": "usage", "parses": true },
+  { "text": "usage limit · resets in: 3 hours", "kind": "usage", "parses": true },
+  { "text": "You've hit your weekly limit · resets Jul 24, 2030 at 10:00 AM UTC", "kind": "usage", "weekly": true, "parses": true },
+  { "text": "try again at Jul 5th, 2030 4:09 PM UTC", "kind": "usage", "parses": true },
+  { "text": "API Error 529: service overloaded", "kind": "overload" },
+  { "text": "API Error: 429 rate limited", "kind": "overload" },
+  { "text": "overloaded_error: upstream is saturated", "kind": "overload" },
+  { "text": "Rate limit exceeded. Please wait before retrying.", "kind": null },
+  { "text": "All tests passed, 42 assertions", "kind": null },
+  { "text": "The word reset appears in this sentence about form resets", "kind": null }
+]

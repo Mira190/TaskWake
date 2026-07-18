@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 // One short-lived process per interrupted session: wait, probe, and verify.
 // Usage sessions share one durable gate so several Claudes never probe the same account together.
-import { mkdir, open, stat, unlink } from 'node:fs/promises';
+import { mkdir, open, readdir, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { cleanId, failureKind, isWeekly, resetEpoch } from './core.js';
+import {
+  cleanId, estimateTokens, failureKind, isWeekly, looksBricked, looksIdle,
+  parseCliJsonResult, resetEpoch,
+} from './core.js';
 import { t } from './i18n.js';
 import { doneDir, home, loadConfig, log, notify, pendingDir, readJson, runCommand, writeAtomic } from './store.js';
 
 const CHUNK = 60_000; // local cancellation/clock check; this never calls Claude
 const GATE_STALE_MS = 2 * 60_000;
+const WEEK_MS = 7 * 24 * 60 * 60 * 1_000;
 const gateFile = join(home, 'usage-gate.json');
 const gateLock = `${gateFile}.lock`;
 const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -70,6 +74,20 @@ function nextUsageCheck(deadline, config, now = Date.now()) {
   return Math.max(now, Math.min(deadline, now + jitter(config.usagePollMs, 0.08)));
 }
 
+// Counts recent successful auto-resumes across ALL sessions so a night of repeated 5-hour
+// resets can't silently burn most of the weekly cap before a human notices.
+export async function recentResumeCount(windowMs = WEEK_MS, now = Date.now()) {
+  let names = [];
+  try { names = (await readdir(doneDir)).filter((name) => name.endsWith('.json')); }
+  catch { return 0; }
+  let count = 0;
+  for (const name of names) {
+    const record = await readJson(join(doneDir, name));
+    if (record && (record.status === 'resumed' || record.status === 'resumed-idle') && now - (record.finishedAt || 0) < windowMs) count++;
+  }
+  return count;
+}
+
 export async function wait(session, config) {
   const file = join(pendingDir, `${cleanId(session)}.json`);
   const state = await readJson(file);
@@ -90,9 +108,16 @@ export async function wait(session, config) {
     notify('TaskWake', t(`Weekly limit hit; not auto-resuming. Reopen later: claude --resume ${session}`, `已达到每周限额，未自动续跑。稍后重新打开：claude --resume ${session}`), config);
     return finish('skipped-weekly');
   }
-  if (state.transcriptBytes > config.maxContextResume) {
+  if (state.transcriptBytes > config.maxContextResume || estimateTokens(state.transcriptBytes) > config.maxContextResumeTokens) {
     notify('TaskWake', t(`Transcript too large for efficient auto-resume. Reopen: claude --resume ${session}`, `会话记录过大，不适合高效自动续跑。重新打开：claude --resume ${session}`), config);
     return finish('skipped-context');
+  }
+  if (state.kind === 'usage' && config.weeklyResumeCeiling > 0 && (await recentResumeCount(WEEK_MS)) >= config.weeklyResumeCeiling) {
+    notify('TaskWake', t(
+      `Reached the configured weekly auto-resume ceiling (${config.weeklyResumeCeiling}); not auto-resuming to protect the rest of your weekly quota. Reopen: claude --resume ${session}`,
+      `已达到配置的每周自动续跑上限（${config.weeklyResumeCeiling}）；为保留剩余每周额度未自动续跑。重新打开：claude --resume ${session}`,
+    ), config);
+    return finish('skipped-weekly-budget');
   }
 
   let { deadline, trusted } = initialDeadline(state, config);
@@ -133,11 +158,33 @@ export async function wait(session, config) {
       },
     );
     const combined = `${result.stdout}\n${result.stderr}`;
-    const kind = failureKind(combined);
-    if (result.code === 0 && !kind) {
+    if (looksBricked(combined)) {
+      // Matches anthropics/claude-code #76008 / #68553: a resume that leaves the session
+      // permanently corrupted. Retrying can't fix it, so stop instead of burning maxAttempts.
+      if (wasUsage) await setUsageGate(session, Date.now() + config.usageResumeSpacingMs, 'bricked');
+      notify('TaskWake', t(
+        `Resume left the session corrupted (previous_message_id error) and can't be safely retried. Reopen manually: claude --resume ${session}`,
+        `续跑后会话已损坏（previous_message_id 错误），无法安全重试。请手动重新打开：claude --resume ${session}`,
+      ), config);
+      return finish('bricked', { attempts: state.probes });
+    }
+
+    // Classify from the structured --output-format json result when available, scanning only
+    // the model's final reply text plus stderr — not the whole raw output — so a successful
+    // continuation that legitimately mentions "rate limit" or "try again" (dogfooding
+    // TaskWake, writing a rate limiter, test output, ...) is never misread as still-limited.
+    // Falls back to a full raw-text scan when stdout isn't a parseable JSON result (older CLI,
+    // or a hard failure that never printed one).
+    const parsedResult = parseCliJsonResult(result.stdout);
+    const scanText = parsedResult ? `${parsedResult.resultText}\n${result.stderr}` : combined;
+    const kind = failureKind(scanText);
+    if (result.code === 0 && !parsedResult?.isError && !kind) {
       if (wasUsage) await setUsageGate(session, Date.now() + config.usageResumeSpacingMs, 'resumed');
-      notify('TaskWake', t(`Session resumed. Reopen: claude --resume ${session}`, `会话已续跑。重新打开：claude --resume ${session}`), config);
-      return finish('resumed', { attempts: state.probes });
+      const idle = looksIdle(parsedResult?.resultText || '');
+      notify('TaskWake', idle
+        ? t(`Session resumed, but the reply reads like it was blocked by permission prompts (may not have done real work). Check the claudeCmd permission mode. Reopen: claude --resume ${session}`, `会话已续跑，但回复内容像是被权限提示阻塞（可能未实际完成工作）。请检查 claudeCmd 的权限模式。重新打开：claude --resume ${session}`)
+        : t(`Session resumed. Reopen: claude --resume ${session}`, `会话已续跑。重新打开：claude --resume ${session}`), config);
+      return finish(idle ? 'resumed-idle' : 'resumed', { attempts: state.probes });
     }
 
     const now = Date.now();
@@ -167,5 +214,10 @@ export async function wait(session, config) {
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  await wait(process.argv[2], await loadConfig());
+  const session = process.argv[2];
+  // Peek the pending record's cwd so a project-local .taskwake.json can override settings
+  // like weeklyResumeCeiling for a real run, without changing wait()'s signature (tests call
+  // wait() directly with an explicit config object and must not have it silently reloaded).
+  const peeked = await readJson(join(pendingDir, `${cleanId(session)}.json`));
+  await wait(session, await loadConfig(peeked?.cwd));
 }

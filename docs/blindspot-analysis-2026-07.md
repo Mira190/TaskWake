@@ -1,6 +1,29 @@
 # TaskWake Blindspot Analysis & Execution Plan
 
 **Date:** 2026-07-18 · **Scope:** research synthesis only — no code changes were made.
+
+> **Update 2026-07-18 (implementation pass):** Phase 1 (§8) has been implemented, scoped to
+> correctness/safety fixes that don't require a live account: the `error_type`/`error`
+> precedence bug and `error_details`-object stringification bug (§2.2) are fixed with
+> defensive handling of both plausible payload shapes, since Phase 0's live capture was
+> deliberately deferred (see below); classification now prefers the structured
+> `--output-format json` result over raw-text scanning (§2.5); bricked-session (#76008-style)
+> and permission-stalled "success theater" (§2.6) detection were added; the byte-based context
+> gate got a token-estimate sibling (§4); a rolling-7-day weekly-resume-budget ceiling was
+> added (§4); Ralph and other settings gained a per-project `.taskwake.json` overlay (§4);
+> the dashboard gained a Host-header allowlist and a per-launch token (§2.7); and the README's
+> now-incorrect billing claim was corrected (§5.1). All 39 tests pass (`node --test
+> test/core.test.js test/waiter.test.js`; the bare `node --test test/` directory-glob form
+> fails in at least one sandboxed environment for reasons unrelated to this project — verified
+> before any change was made).
+>
+> **Deliberately NOT done in this pass, and still open:** Phase 0's empirical capture (§2.1,
+> §2.3 — whether subscription seat limits actually fire StopFailure, and whether `--resume -p`
+> truly preserves the session id in practice) still requires a live account and was explicitly
+> deferred rather than guessed at; the field-precedence fix is written defensively for exactly
+> this reason. Phases 2–3 (quota governor, checkpoint-handoff resume, verified-resume
+> reporting, cross-provider handoff, etc.) were not started. The LICENSE upstream-copyright
+> sync (§5.4) was skipped rather than guessed at without re-fetching the upstream file.
 **Inputs:** full source read of this repo; Claude Code official docs (code.claude.com, fetched
 2026-07-18); GitHub API data on ~25 competing tools (exact stars/licenses/push dates as of
 2026-07-18); anthropics/claude-code and openai/codex issue trackers; press coverage of the

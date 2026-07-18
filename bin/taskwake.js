@@ -18,7 +18,9 @@ async function list(dir) {
 }
 
 const statusName = (status) => ({
-  resumed: t('resumed', '已续跑'), 'skipped-weekly': t('weekly limit skipped', '已跳过每周限额'),
+  resumed: t('resumed', '已续跑'), 'resumed-idle': t('resumed, possibly idle', '已续跑（可能未实际工作）'),
+  bricked: t('session corrupted', '会话已损坏'), 'skipped-weekly': t('weekly limit skipped', '已跳过每周限额'),
+  'skipped-weekly-budget': t('weekly resume ceiling reached', '已达每周续跑上限'),
   'skipped-context': t('large context skipped', '已跳过超大上下文'), 'gave-up': t('gave up', '已停止重试'),
 }[status] || status);
 

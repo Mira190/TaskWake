@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { open, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -151,7 +152,10 @@ export async function buildSnapshot() {
     }
   }
 
-  const priority = { running: 0, active: 1, waiting: 2, orphaned: 3, stale: 4, ended: 5, resumed: 6, failed: 7, done: 8 };
+  const priority = {
+    running: 0, active: 1, waiting: 2, orphaned: 3, stale: 4, ended: 5, resumed: 6, 'resumed-idle': 6,
+    bricked: 7, failed: 7, 'gave-up': 7, 'skipped-weekly-budget': 7, done: 8,
+  };
   sessions.sort((a, b) => (priority[a.status] ?? 9) - (priority[b.status] ?? 9) || b.updatedAt - a.updatedAt);
   return {
     generatedAt: Date.now(),
@@ -176,16 +180,35 @@ function openBrowser(url) {
   } catch { /* opening is best-effort */ }
 }
 
+// Host-header allowlist blocks DNS-rebinding (a hostile page pointing a browser's fetch at a
+// domain that resolves to 127.0.0.1); the per-launch token blocks other local accounts on a
+// shared machine from reading session/transcript activity just by guessing the fixed port.
+function isLoopbackHost(host = '') {
+  return /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host);
+}
+
 export async function startDashboard({ port = 4178, open = true } = {}) {
+  const token = randomBytes(16).toString('hex');
   const server = createServer(async (request, response) => {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
-    if (request.url === '/') {
+    if (!isLoopbackHost(request.headers.host)) {
+      response.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      response.end('Forbidden');
+      return;
+    }
+    const url = new URL(request.url, `http://${request.headers.host}`);
+    if (url.searchParams.get('token') !== token) {
+      response.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      response.end('Forbidden: missing or invalid token');
+      return;
+    }
+    if (url.pathname === '/') {
       response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       response.end(dashboardPage);
       return;
     }
-    if (request.url === '/api') {
+    if (url.pathname === '/api') {
       try {
         response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         response.end(JSON.stringify(await buildSnapshot()));
@@ -202,7 +225,7 @@ export async function startDashboard({ port = 4178, open = true } = {}) {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', resolve);
   });
-  const url = `http://127.0.0.1:${port}`;
+  const url = `http://127.0.0.1:${port}/?token=${token}`;
   process.stdout.write(t(`TaskWake dashboard: ${url}\n`, `TaskWake 控制台：${url}\n`));
   if (open) openBrowser(url);
   return server;

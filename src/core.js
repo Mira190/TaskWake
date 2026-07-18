@@ -11,12 +11,66 @@ export const defaults = Object.freeze({
   maxAttempts: 4,
   overloadMs: [30_000, 60_000, 120_000, 240_000, 300_000],
   maxContextResume: 2_000_000,
+  maxContextResumeTokens: 200_000,
+  weeklyResumeCeiling: 50,
   weeklyPolicy: 'notify',
   notify: 'toast',
   claudeCmd: ['claude'],
   ralph: false,
   ralphMaxTurns: 20,
+  ralphTaskFiles: ['TODO.md', 'REVIEW_AND_HANDOFF.md', 'GAME_DESIGN.md'],
 });
+
+// Rough, conservative token estimate from a byte count (~4 bytes/token for English text).
+// JSON structural overhead in a transcript pushes the true ratio higher (fewer tokens per
+// byte), so this over-estimates tokens if anything — safe direction for a skip-resume gate.
+export function estimateTokens(bytes = 0) {
+  return Math.ceil(Math.max(0, bytes) / 4);
+}
+
+const idleWords = [
+  /\bi (?:don't|do not|can't|cannot) (?:have|get) (?:permission|access)\b/i,
+  /\bnot allowed to\b/i,
+  /\brequires? (?:approval|permission)\b/i,
+  /\bpermission denied\b/i,
+  /\bplease (?:grant|enable) (?:permission|access)\b/i,
+  /\bwaiting for (?:your |user )?(?:approval|permission)\b/i,
+];
+
+// Heuristic only: flags a "successful" (exit 0) resume whose final text reads like the
+// model was blocked by tool permissions rather than doing real work. False negatives are
+// expected (many valid replies never mention permissions); it exists to annotate, not gate.
+export function looksIdle(text = '') {
+  return idleWords.some((pattern) => pattern.test(text));
+}
+
+const brickedWords = [/\bprevious_message_id\b/i];
+
+// Matches the upstream "resume permanently corrupts the session" failure signature
+// (anthropics/claude-code #76008 / #68553): retrying it burns attempts on something that
+// cannot succeed, so the waiter should recognize it and stop instead of exhausting maxAttempts.
+export function looksBricked(text = '') {
+  return brickedWords.some((pattern) => pattern.test(text));
+}
+
+// Parses `claude ... --output-format json` stdout structurally so the waiter can classify a
+// completed turn without regex-scanning the model's own (possibly rate-limit-discussing)
+// reply text. Returns null when stdout isn't a single JSON result object, so callers can fall
+// back to the legacy full-text scan for older CLI versions or hard failures that never print JSON.
+export function parseCliJsonResult(stdout = '') {
+  const trimmed = stdout.trim();
+  if (!trimmed.startsWith('{')) return null;
+  let value;
+  try { value = JSON.parse(trimmed); } catch { return null; }
+  if (!value || typeof value !== 'object') return null;
+  const isError = value.is_error === true || (typeof value.subtype === 'string' && value.subtype.startsWith('error'));
+  return {
+    isError,
+    resultText: typeof value.result === 'string' ? value.result : '',
+    numTurns: Number.isFinite(value.num_turns) ? value.num_turns : undefined,
+    totalCostUsd: Number.isFinite(value.total_cost_usd) ? value.total_cost_usd : undefined,
+  };
+}
 
 const usageWords = [
   /\b\d+-hour limit\b/i,

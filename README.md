@@ -119,14 +119,26 @@ credentials, spend money, mass-kill processes, or invent product scope. Claude's
 Auto-resume is not free: after a long wait the prompt cache is cold and the
 resume re-reads the whole transcript at full input price.
 
-Since June 15, 2026, Anthropic accounts `claude -p` against a separate monthly
-Agent SDK credit rather than the interactive 5-hour allowance. taskwake still
-waits for the interactive reset before continuing, but the headless continuation
-requires available Agent SDK credit. Defaults:
+Anthropic announced on May 14, 2026 that headless usage (`claude -p`, the
+Agent SDK, GitHub Actions) would move off the Pro/Max/Team/Enterprise
+subscription pools onto a separate monthly dollar credit starting June 15,
+2026 — but **paused that change on June 15, the day it was due to take
+effect**. As of this writing, headless `claude -p` continuations still draw
+on the same subscription window as interactive use; Anthropic has said an
+updated plan will be shared before anything takes effect. This could change
+without notice — if a revived split ships, every taskwake resume (which is
+inherently headless) would start costing API dollars instead of subscription
+quota. Defaults:
 
 - 5-hour-class limits: auto-resume.
 - Weekly limits: notify only (`weeklyPolicy: "resume"` to override).
-- Transcripts over `maxContextResume` bytes (default 2 MB): notify only.
+- Auto-resumes in the trailing 7 days at or above `weeklyResumeCeiling`
+  (default 50): notify only, to keep an all-night retry loop from quietly
+  burning most of the weekly window before you notice.
+- Transcripts over `maxContextResume` bytes (default 2 MB) **or** an
+  estimated `maxContextResumeTokens` (default 200,000, derived from the
+  transcript's byte size — a rough, deliberately conservative estimate):
+  notify only.
 
 ## Commands
 
@@ -156,7 +168,10 @@ is out of scope until the app-server rate-limit protocol stabilizes.
 
 ## Configuration
 
-Optional config at `~/.taskwake.json`:
+Optional global config at `~/.taskwake.json`. A `.taskwake.json` in a
+project's working directory is layered on top of the global config for
+sessions in that directory — use it to opt one project in or out of `ralph`
+(or any other field) without changing the machine-wide default.
 
 | field              | default                              |
 |--------------------|--------------------------------------|
@@ -168,11 +183,28 @@ Optional config at `~/.taskwake.json`:
 | `maxAttempts`      | `4`                                  |
 | `overloadMs`       | `[30000, 60000, 120000, 240000, 300000]` |
 | `maxContextResume` | `2000000` (bytes)                    |
+| `maxContextResumeTokens` | `200000` (rough estimate from transcript bytes) |
+| `weeklyResumeCeiling` | `50` (auto-resumes per rolling 7 days before falling back to notify-only; `0` disables) |
 | `weeklyPolicy`     | `"notify"` (`"resume"` to auto-resume) |
 | `claudeCmd`        | `["claude"]`                         |
 | `ralph`            | `false`                                |
 | `ralphMaxTurns`    | `20`                                   |
+| `ralphTaskFiles`   | `["TODO.md", "REVIEW_AND_HANDOFF.md", "GAME_DESIGN.md"]` |
 | `notify`           | `"toast"` (`"none"` to disable)      |
+
+**Permission mode matters.** `claudeCmd` defaults to `["claude"]`, which runs
+the headless resume probe under Claude Code's default permission mode. In
+`-p` mode there is no one to answer a permission prompt, so tool calls can be
+silently denied — the resumed turn then just narrates and exits 0, and
+taskwake reports success even though no real work happened (it does try to
+flag this heuristically as `resumed-idle` when the reply reads like a
+permission block, but that detection isn't exhaustive). If you want resumes
+to actually finish work unattended, set a non-interactive permission mode
+explicitly, e.g.:
+
+```json
+{ "claudeCmd": ["claude", "--permission-mode", "acceptEdits"] }
+```
 
 State lives in `~/.taskwake/` (flat JSON files; delete the directory to reset).
 

@@ -159,7 +159,7 @@ export async function buildSnapshot() {
     summary: {
       active: sessions.filter((item) => ['active', 'running'].includes(item.status)).length,
       waiting: sessions.filter((item) => ['waiting', 'orphaned'].includes(item.status)).length,
-      ralph: sessions.filter((item) => item.ralphTurns).length,
+      ralph: sessions.filter((item) => item.ralphTurns && ['active', 'running', 'waiting', 'orphaned'].includes(item.status)).length,
       conflicts,
     },
     sessions: sessions.slice(0, 30),

@@ -195,6 +195,9 @@ describe('Ralph loop', () => {
     assert.match(first.reason, /1\/2/);
     assert.match(first.reason, /reversible project-local choice/);
     assert.equal(await ralph({ session_id: 'ralph-on' }, settings), undefined, 'max turns stops');
+    await ralph({ session_id: 'ralph-ended' }, settings);
+    await trackSession({ session_id: 'ralph-ended', reason: 'other' }, true, process.pid);
+    assert.equal(await readJson(join(home, 'ralph', 'ralph-ended.json')), undefined, 'session end clears Ralph state');
     assert.equal(await ralph({
       session_id: 'ralph-done', last_assistant_message: 'All safe local work is complete. [RALPH_DONE]',
     }, settings), undefined, 'sentinel stops');

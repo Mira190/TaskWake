@@ -7,6 +7,26 @@ import {
 } from '../src/core.js';
 import { dashboardPage } from '../src/dashboard-page.js';
 import { isChineseLocale } from '../src/i18n.js';
+import { canShowTerminal } from '../src/store.js';
+import { shouldOpenTerminal } from '../src/waiter.js';
+
+describe('visible resume policy', () => {
+  it('opens only after the deadline on an interactive desktop', async () => {
+    assert.equal(await shouldOpenTerminal('usage', 'hybrid', 10, 9, { SESSIONNAME: 'Console' }, 'win32'), false);
+    assert.equal(await shouldOpenTerminal('usage', 'hybrid', 10, 10, { SESSIONNAME: 'Console' }, 'win32'), true);
+    assert.equal(await shouldOpenTerminal('usage', 'headless', 10, 10, { SESSIONNAME: 'Console' }, 'win32'), false);
+  });
+
+  it('detects interactive desktops without treating services as visible', async () => {
+    assert.equal(await canShowTerminal({ SESSIONNAME: 'Console' }, 'win32'), true);
+    assert.equal(await canShowTerminal({ SESSIONNAME: 'Services' }, 'win32'), false);
+    assert.equal(await canShowTerminal({}, 'win32', async () => ({ code: 0 })), true);
+    assert.equal(await canShowTerminal({}, 'win32', async () => ({ code: 1 })), false);
+    assert.equal(await canShowTerminal({}, 'win32', async () => { throw new Error('blocked'); }), false);
+    assert.equal(await canShowTerminal({ DISPLAY: ':0' }, 'linux'), true);
+    assert.equal(await canShowTerminal({}, 'linux'), false);
+  });
+});
 
 describe('locale detection', () => {
   it('uses Chinese only for zh system locales', () => {

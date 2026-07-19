@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { cleanId, failureKind, isWeekly, resetEpoch } from './core.js';
 import { t } from './i18n.js';
-import { doneDir, home, loadConfig, log, notify, pendingDir, readJson, runCommand, writeAtomic } from './store.js';
+import { canShowTerminal, doneDir, home, loadConfig, log, notify, openTerminal, pendingDir, readJson, runCommand, writeAtomic } from './store.js';
 
 const CHUNK = 60_000; // local cancellation/clock check; this never calls Claude
 const GATE_STALE_MS = 2 * 60_000;
@@ -70,6 +70,10 @@ function nextUsageCheck(deadline, config, now = Date.now()) {
   return Math.max(now, Math.min(deadline, now + jitter(config.usagePollMs, 0.08)));
 }
 
+export async function shouldOpenTerminal(kind, mode, deadline, now = Date.now(), env = process.env, platform = process.platform, probe) {
+  return kind === 'usage' && mode !== 'headless' && now >= deadline && await canShowTerminal(env, platform, probe);
+}
+
 export async function wait(session, config) {
   const file = join(pendingDir, `${cleanId(session)}.json`);
   const state = await readJson(file);
@@ -90,10 +94,7 @@ export async function wait(session, config) {
     notify('TaskWake', t(`Weekly limit hit; not auto-resuming. Reopen later: claude --resume ${session}`, `已达到每周限额，未自动续跑。稍后重新打开：claude --resume ${session}`), config);
     return finish('skipped-weekly');
   }
-  if (state.transcriptBytes > config.maxContextResume) {
-    notify('TaskWake', t(`Transcript too large for efficient auto-resume. Reopen: claude --resume ${session}`, `会话记录过大，不适合高效自动续跑。重新打开：claude --resume ${session}`), config);
-    return finish('skipped-context');
-  }
+  const oversized = state.transcriptBytes > config.maxContextResume;
 
   let { deadline, trusted } = initialDeadline(state, config);
   let until = state.kind === 'usage'
@@ -110,6 +111,12 @@ export async function wait(session, config) {
 
     const wasUsage = state.kind === 'usage';
     const earlyTrustedProbe = wasUsage && trusted && Date.now() < deadline;
+    if (oversized && Date.now() < deadline) {
+      until = deadline;
+      state.nextTry = until;
+      await writeAtomic(file, state);
+      continue;
+    }
     if (wasUsage) {
       const gate = await claimUsageProbe(session, config);
       if (!gate.claimed) {
@@ -118,6 +125,21 @@ export async function wait(session, config) {
         await writeAtomic(file, state);
         continue;
       }
+    }
+
+    if (await shouldOpenTerminal(state.kind, config.resumeMode, deadline)) {
+      try {
+        const terminalPid = await openTerminal([...config.claudeCmd, '--resume', session, config.retryText], state.cwd);
+        await setUsageGate(session, Date.now() + config.usageResumeSpacingMs, 'opened');
+        notify('TaskWake', t('Session opened in a terminal.', '会话已在终端中打开。'), config);
+        return finish('opened', { attempts: state.probes, terminalPid });
+      } catch (error) {
+        await log(`visible resume failed session=${session} error=${error.message}; falling back headless`);
+      }
+    }
+    if (oversized) {
+      notify('TaskWake', t(`Transcript too large for efficient headless resume. Reopen: claude --resume ${session}`, `会话记录过大，不适合无头续跑。重新打开：claude --resume ${session}`), config);
+      return finish('skipped-context');
     }
 
     state.probes++;

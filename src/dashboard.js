@@ -3,13 +3,14 @@ import { createServer } from 'node:http';
 import { open, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { pathsOverlap } from './core.js';
+import { cleanId, pathsOverlap } from './core.js';
 import { t } from './i18n.js';
-import { home, pendingDir, doneDir, sessionsDir, readJson, tailLog } from './store.js';
+import { home, pendingDir, doneDir, sessionsDir, loadConfig, log, openTerminal, readJson, tailLog } from './store.js';
 import { dashboardPage } from './dashboard-page.js';
 
 const ralphDir = join(home, 'ralph');
 const transcriptCache = new Map();
+const opening = new Set();
 
 async function listJson(dir) {
   try {
@@ -151,7 +152,7 @@ export async function buildSnapshot() {
     }
   }
 
-  const priority = { running: 0, active: 1, waiting: 2, orphaned: 3, stale: 4, ended: 5, resumed: 6, failed: 7, done: 8 };
+  const priority = { running: 0, active: 1, waiting: 2, orphaned: 3, stale: 4, ended: 5, opened: 6, resumed: 7, failed: 8, done: 9 };
   sessions.sort((a, b) => (priority[a.status] ?? 9) - (priority[b.status] ?? 9) || b.updatedAt - a.updatedAt);
   return {
     generatedAt: Date.now(),
@@ -176,7 +177,27 @@ function openBrowser(url) {
   } catch { /* opening is best-effort */ }
 }
 
+export function canOpenSession(item) {
+  return item && !['active', 'running', 'waiting', 'orphaned'].includes(item.status);
+}
+
+async function openSessionTerminal(item) {
+  const config = await loadConfig();
+  await openTerminal([...config.claudeCmd, '--resume', item.session], item.cwd || homedir());
+}
+
+async function readBody(request, limit = 4_096) {
+  const parts = [];
+  let size = 0;
+  for await (const part of request) {
+    size += part.length;
+    if (size > limit) throw new Error('Request too large');
+    parts.push(part);
+  }
+  return JSON.parse(Buffer.concat(parts).toString('utf8'));
+}
 export async function startDashboard({ port = 4178, open = true } = {}) {
+  let dashboardOrigin;
   const server = createServer(async (request, response) => {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
@@ -195,6 +216,41 @@ export async function startDashboard({ port = 4178, open = true } = {}) {
       }
       return;
     }
+    if (request.url === '/api/open' && request.method === 'POST') {
+      response.setHeader('Content-Type', 'application/json; charset=utf-8');
+      try {
+        if (request.headers.origin !== dashboardOrigin || request.headers['x-taskwake-action'] !== 'open-session') {
+          response.writeHead(403);
+          response.end(JSON.stringify({ error: 'Forbidden' }));
+          return;
+        }
+        const { session } = await readBody(request);
+        if (typeof session !== 'string' || session.length > 128 || cleanId(session) !== session) throw new Error('Invalid session');
+        const item = (await buildSnapshot()).sessions.find((entry) => entry.session === session);
+        if (!item) {
+          response.writeHead(404);
+          response.end(JSON.stringify({ error: 'Session not found' }));
+          return;
+        }
+        if (!canOpenSession(item) || opening.has(session)) {
+          response.writeHead(409);
+          response.end(JSON.stringify({ error: 'Session is already controlled by TaskWake or Claude' }));
+          return;
+        }
+        opening.add(session);
+        const release = setTimeout(() => opening.delete(session), 10_000);
+        release.unref();
+        try { await openSessionTerminal(item); }
+        catch (error) { opening.delete(session); throw error; }
+        await log(`interactive takeover opened session=${session}`);
+        response.writeHead(200);
+        response.end(JSON.stringify({ ok: true }));
+      } catch (error) {
+        response.writeHead(400);
+        response.end(JSON.stringify({ error: error.message }));
+      }
+      return;
+    }
     response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     response.end('Not found');
   });
@@ -202,7 +258,8 @@ export async function startDashboard({ port = 4178, open = true } = {}) {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', resolve);
   });
-  const url = `http://127.0.0.1:${port}`;
+  const url = `http://127.0.0.1:${server.address().port}`;
+  dashboardOrigin = url;
   process.stdout.write(t(`TaskWake dashboard: ${url}\n`, `TaskWake 控制台：${url}\n`));
   if (open) openBrowser(url);
   return server;

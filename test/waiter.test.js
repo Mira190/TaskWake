@@ -15,7 +15,7 @@ const { saveEvent, reconcile, ralph, trackSession } = await import('../src/hook.
 const { claimUsageProbe, wait } = await import('../src/waiter.js');
 const { home, pendingDir, doneDir, sessionsDir, readJson, writeAtomic } = await import('../src/store.js');
 const { defaults } = await import('../src/core.js');
-const { buildSnapshot } = await import('../src/dashboard.js');
+const { buildSnapshot, canOpenSession, startDashboard } = await import('../src/dashboard.js');
 
 const waiterPath = fileURLToPath(new URL('../src/waiter.js', import.meta.url));
 const hookPath = fileURLToPath(new URL('../src/hook.js', import.meta.url));
@@ -23,7 +23,7 @@ const callsFile = join(tmp, 'shim-calls.txt');
 const shimOk = join(tmp, 'shim-ok.mjs');
 const shimLimited = join(tmp, 'shim-limited.mjs');
 const config = (claudeCmd) => ({
-  ...defaults, claudeCmd, marginMs: 0, notify: 'none', maxAttempts: 2,
+  ...defaults, claudeCmd, resumeMode: 'headless', marginMs: 0, notify: 'none', maxAttempts: 2,
   usagePollMs: 50, usageResumeSpacingMs: 50, overloadMs: [50, 50],
 });
 
@@ -130,6 +130,31 @@ describe('reconcile after reboot', () => {
 });
 
 describe('multi-session tracking and dashboard', () => {
+  it('opens only sessions that have no live automatic or interactive owner', () => {
+    for (const status of ['active', 'running', 'waiting', 'orphaned']) assert.equal(canOpenSession({ status }), false, status);
+    for (const status of ['ended', 'resumed', 'gave-up', 'stale']) assert.equal(canOpenSession({ status }), true, status);
+  });
+
+  it('rejects cross-site and concurrent terminal takeover requests', async () => {
+    await trackSession({ session_id: 'takeover-busy', cwd: tmp }, false, process.pid);
+    const server = await startDashboard({ port: 0, open: false });
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const forbidden = await fetch(`${origin}/api/open`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session: 'takeover-busy' }),
+      });
+      assert.equal(forbidden.status, 403);
+      const busy = await fetch(`${origin}/api/open`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-TaskWake-Action': 'open-session', Origin: origin },
+        body: JSON.stringify({ session: 'takeover-busy' }),
+      });
+      assert.equal(busy.status, 409);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
   it('tracks lifecycle, transcript activity, and same-directory conflicts', async () => {
     const transcriptA = join(tmp, 'tracked-a.jsonl');
     const transcriptB = join(tmp, 'tracked-b.jsonl');

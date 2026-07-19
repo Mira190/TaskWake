@@ -1,7 +1,7 @@
 {
   "name": "taskwake",
   "description": "Keep AI coding agents moving across usage resets and completed tasks",
-  "owner": { "name": "Mira" },
+  "owner": { "name": "TaskWake Contributors" },
   "plugins": [
     {
       "name": "taskwake",

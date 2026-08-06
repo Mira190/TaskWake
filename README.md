@@ -3,7 +3,8 @@
 Re-wakes Claude Code sessions when a usage window resets. No tmux, no terminal
 scraping, no keystroke injection — a Claude Code **plugin** whose `StopFailure`
 hook records the interrupted session and a small detached waiter resumes the
-exact transcript headlessly with `claude --resume <session-id> -p`. Works
+exact transcript in a new visible terminal when a desktop is available, with a
+headless fallback when it is not. Works
 natively on Windows, macOS, and Linux.
 
 It does not bypass quota. It waits for the published reset, then continues
@@ -59,14 +60,14 @@ Troubleshooting:
    fall back to the 5-hour window, then **probe**: `claude --resume <id> -p "Continue from
    the interruption."` — if still limited, it re-parses and re-waits, bounded
    by `maxAttempts`.
-4. On success you get a desktop notification. Reopen the session interactively
-   anytime with `claude --resume <session-id>`.
+4. At the real reset deadline, the default `hybrid` mode opens the same session in
+   a new native terminal when a desktop is available. Otherwise it resumes headlessly.
 5. Multi-session aware: `SessionStart` registers each Claude session and also repairs
    orphaned waiters. `SessionEnd` marks clean exits. On Windows the optional Task Scheduler
    entry repairs pending work after boot and every 5 minutes without login.
 
-Honest limitations: the resumed work continues in the transcript headlessly;
-your original terminal screen is not revived. The dashboard below shows live transcript
+Honest limitation: an exited terminal process cannot be revived. TaskWake opens a new
+native terminal attached to the same Claude transcript; the dashboard below shows live transcript
 activity but is not an interactive Claude terminal. Boot recovery is currently implemented
 only for Windows. If the machine is powered off at the reset time, continuation runs
 after it boots; software cannot run while the machine is off.
@@ -85,6 +86,10 @@ It listens only on `127.0.0.1:4178`, opens the default browser, and refreshes ev
 2 seconds. It merges active Claude sessions, pending limit waiters, running headless
 continuations, Ralph turns, recent transcript tools/messages, and the TaskWake log.
 Pass another port as the first argument or use `--no-open` to keep the browser closed.
+
+Use **Open session** to launch `claude --resume <session-id>` in a visible terminal.
+TaskWake enables it only when no live Claude, waiter, or headless continuation owns the
+session, preventing two processes from driving the same transcript.
 
 Sessions started after v0.5.0 are registered automatically; older rate-limited sessions
 still appear from their pending state. If two active Claude sessions point at the same
@@ -134,11 +139,13 @@ quota. Defaults:
 - Weekly limits: notify only (`weeklyPolicy: "resume"` to override).
 - Auto-resumes in the trailing 7 days at or above `weeklyResumeCeiling`
   (default 50): notify only, to keep an all-night retry loop from quietly
-  burning most of the weekly window before you notice.
+  burning most of the weekly window before you notice. Visible-terminal
+  opens count too, because they auto-submit the continuation prompt.
 - Transcripts over `maxContextResume` bytes (default 2 MB) **or** an
   estimated `maxContextResumeTokens` (default 200,000, derived from the
   transcript's byte size — a rough, deliberately conservative estimate):
-  notify only.
+  visible resume when a desktop is available; notify instead of using the
+  costly headless path.
 
 ## Commands
 
@@ -176,6 +183,7 @@ sessions in that directory — use it to opt one project in or out of `ralph`
 | field              | default                              |
 |--------------------|--------------------------------------|
 | `retryText`        | `"Continue from the interruption."`  |
+| `resumeMode`       | `"hybrid"` (`"headless"` to disable visible terminals) |
 | `marginMs`         | `60000`                              |
 | `fallbackMs`       | `18000000` (5 h)                     |
 | `usagePollMs`      | `3600000` (1 h, shared across sessions) |

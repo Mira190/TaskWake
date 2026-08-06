@@ -10,6 +10,7 @@ import { t } from './i18n.js';
 import { loadConfig, log, pendingDir, readJson, sessionsDir, writeAtomic } from './store.js';
 
 const kinds = { rate_limit: 'usage', overloaded: 'overload', server_error: 'overload' };
+const ralphFile = (session) => join(dirname(pendingDir), 'ralph', `${cleanId(session)}.json`);
 
 // Documented StopFailure schema: `error_type` is the matcher token (e.g. "rate_limit"),
 // `error` is a human-readable message, `error_details` is an object (may carry
@@ -84,6 +85,7 @@ export async function trackSession(input, ended = false, claudePid = process.ppi
   };
   if (ended) record.reason = input.reason;
   await writeAtomic(file, record);
+  if (ended) await unlink(ralphFile(session)).catch(() => {});
   return record;
 }
 export function startWaiter(session) {
@@ -125,7 +127,7 @@ export async function ralph(input, config) {
   // global ~/.taskwake.json sets ralph for every session on the machine.
   config ||= await loadConfig(input?.cwd);
   if (!config.ralph) return undefined;
-  const file = join(dirname(pendingDir), 'ralph', `${cleanId(session)}.json`);
+  const file = ralphFile(session);
   const previous = await readJson(file);
   const turns = (previous?.turns || 0) + 1;
   const done = /\[RALPH_DONE\]/i.test(input.last_assistant_message || '');

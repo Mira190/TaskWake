@@ -1,6 +1,6 @@
 {
   "name": "taskwake",
-  "version": "1.0.0",
+  "version": "1.2.2",
   "description": "Keep Claude Code and Codex moving across usage resets and completed tasks",
   "type": "module",
   "bin": {

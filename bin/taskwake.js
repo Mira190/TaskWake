@@ -18,6 +18,7 @@ async function list(dir) {
 }
 
 const statusName = (status) => ({
+  opened: t('opened in terminal', '已在终端打开'),
   resumed: t('resumed', '已续跑'), 'resumed-idle': t('resumed, possibly idle', '已续跑（可能未实际工作）'),
   bricked: t('session corrupted', '会话已损坏'), 'skipped-weekly': t('weekly limit skipped', '已跳过每周限额'),
   'skipped-weekly-budget': t('weekly resume ceiling reached', '已达每周续跑上限'),

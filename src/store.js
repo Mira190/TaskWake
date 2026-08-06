@@ -28,6 +28,7 @@ function applyOverrides(config, raw) {
     if (Number.isFinite(raw[key]) && raw[key] > 0) config[key] = raw[key];
   }
   if (typeof raw.retryText === 'string' && raw.retryText.trim()) config.retryText = raw.retryText;
+  if (['hybrid', 'headless'].includes(raw.resumeMode)) config.resumeMode = raw.resumeMode;
   if (Array.isArray(raw.overloadMs) && raw.overloadMs.length && raw.overloadMs.every((item) => Number.isFinite(item) && item > 0)) {
     config.overloadMs = raw.overloadMs;
   }
@@ -105,6 +106,38 @@ export function runCommand(argv, options = {}) {
       stdout: Buffer.concat(stdout).toString(),
       stderr: Buffer.concat(stderr).toString(),
     }));
+  });
+}
+
+export async function canShowTerminal(env = process.env, platform = process.platform, probe = runCommand) {
+  if (platform === 'win32') {
+    if (/^(services|session 0)$/i.test(env.SESSIONNAME || '')) return false;
+    if (env.SESSIONNAME || env.WT_SESSION || env.TERM_PROGRAM) return true;
+    const script = '$current=(Get-Process -Id $PID).SessionId; if(Get-Process explorer -ErrorAction SilentlyContinue | Where-Object SessionId -eq $current){exit 0}else{exit 1}';
+    try { return (await probe(['powershell.exe', '-NoProfile', '-Command', script])).code === 0; }
+    catch { return false; }
+  }
+  if (platform === 'darwin') return true;
+  return Boolean(env.DISPLAY || env.WAYLAND_DISPLAY);
+}
+
+const shellQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
+
+export function openTerminal(argv, cwd = homedir()) {
+  let command;
+  if (process.platform === 'win32') {
+    const line = argv.map((part) => `"${String(part).replaceAll('"', '')}"`).join(' ');
+    command = ['cmd.exe', ['/d', '/c', 'start', '', 'cmd.exe', '/d', '/k', line]];
+  } else if (process.platform === 'darwin') {
+    const line = `cd ${shellQuote(cwd)} && exec ${argv.map(shellQuote).join(' ')}`;
+    command = ['osascript', ['-e', `tell application "Terminal" to do script ${JSON.stringify(line)}`]];
+  } else {
+    command = ['x-terminal-emulator', ['-e', ...argv]];
+  }
+  const child = spawn(command[0], command[1], { cwd, detached: true, stdio: 'ignore', windowsHide: false });
+  return new Promise((resolve, reject) => {
+    child.once('spawn', () => { child.unref(); resolve(child.pid); });
+    child.once('error', reject);
   });
 }
 

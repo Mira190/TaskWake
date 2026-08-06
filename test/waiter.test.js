@@ -15,7 +15,7 @@ const { saveEvent, reconcile, ralph, trackSession } = await import('../src/hook.
 const { claimUsageProbe, recentResumeCount, wait } = await import('../src/waiter.js');
 const { home, pendingDir, doneDir, sessionsDir, loadConfig, readJson, writeAtomic } = await import('../src/store.js');
 const { defaults } = await import('../src/core.js');
-const { buildSnapshot } = await import('../src/dashboard.js');
+const { buildSnapshot, canOpenSession, startDashboard } = await import('../src/dashboard.js');
 
 const waiterPath = fileURLToPath(new URL('../src/waiter.js', import.meta.url));
 const hookPath = fileURLToPath(new URL('../src/hook.js', import.meta.url));
@@ -26,7 +26,7 @@ const shimMentionsLimit = join(tmp, 'shim-mentions-limit.mjs');
 const shimBricked = join(tmp, 'shim-bricked.mjs');
 const shimIdle = join(tmp, 'shim-idle.mjs');
 const config = (claudeCmd) => ({
-  ...defaults, claudeCmd, marginMs: 0, notify: 'none', maxAttempts: 2,
+  ...defaults, claudeCmd, resumeMode: 'headless', marginMs: 0, notify: 'none', maxAttempts: 2,
   usagePollMs: 50, usageResumeSpacingMs: 50, overloadMs: [50, 50],
 });
 
@@ -172,6 +172,37 @@ describe('reconcile after reboot', () => {
 });
 
 describe('multi-session tracking and dashboard', () => {
+  it('opens only sessions that have no live automatic or interactive owner', () => {
+    for (const status of ['active', 'running', 'waiting', 'orphaned']) assert.equal(canOpenSession({ status }), false, status);
+    for (const status of ['ended', 'resumed', 'gave-up', 'stale']) assert.equal(canOpenSession({ status }), true, status);
+  });
+
+  it('rejects cross-site and concurrent terminal takeover requests', async () => {
+    await trackSession({ session_id: 'takeover-busy', cwd: tmp }, false, process.pid);
+    const server = await startDashboard({ port: 0, open: false });
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const token = new URL(server.taskwakeUrl).searchParams.get('token');
+    try {
+      const noToken = await fetch(`${origin}/api/open`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-TaskWake-Action': 'open-session', Origin: origin },
+        body: JSON.stringify({ session: 'takeover-busy' }),
+      });
+      assert.equal(noToken.status, 403, 'missing token is rejected even with the right headers');
+      const forbidden = await fetch(`${origin}/api/open?token=${token}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session: 'takeover-busy' }),
+      });
+      assert.equal(forbidden.status, 403, 'missing Origin/action header is rejected even with the token');
+      const busy = await fetch(`${origin}/api/open?token=${token}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-TaskWake-Action': 'open-session', Origin: origin },
+        body: JSON.stringify({ session: 'takeover-busy' }),
+      });
+      assert.equal(busy.status, 409);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
   it('tracks lifecycle, transcript activity, and same-directory conflicts', async () => {
     const transcriptA = join(tmp, 'tracked-a.jsonl');
     const transcriptB = join(tmp, 'tracked-b.jsonl');
@@ -212,6 +243,9 @@ describe('Ralph loop', () => {
     assert.match(first.reason, /1\/2/);
     assert.match(first.reason, /reversible project-local choice/);
     assert.equal(await ralph({ session_id: 'ralph-on' }, settings), undefined, 'max turns stops');
+    await ralph({ session_id: 'ralph-ended' }, settings);
+    await trackSession({ session_id: 'ralph-ended', reason: 'other' }, true, process.pid);
+    assert.equal(await readJson(join(home, 'ralph', 'ralph-ended.json')), undefined, 'session end clears Ralph state');
     assert.equal(await ralph({
       session_id: 'ralph-done', last_assistant_message: 'All safe local work is complete. [RALPH_DONE]',
     }, settings), undefined, 'sentinel stops');

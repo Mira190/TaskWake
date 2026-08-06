@@ -8,6 +8,7 @@ export const defaults = Object.freeze({
   usagePollMs: HOUR,
   usageResumeSpacingMs: 5 * 60_000,
   retryText: 'Continue from the interruption.',
+  resumeMode: 'hybrid',
   maxAttempts: 4,
   overloadMs: [30_000, 60_000, 120_000, 240_000, 300_000],
   maxContextResume: 2_000_000,

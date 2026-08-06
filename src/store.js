@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { defaults } from './core.js';
@@ -63,6 +63,18 @@ export async function loadConfig(cwd) {
 
 export async function readJson(path) {
   try { return JSON.parse(await readFile(path, 'utf8')); } catch { return undefined; }
+}
+
+export async function listJson(dir) {
+  try {
+    const names = (await readdir(dir)).filter((name) => name.endsWith('.json'));
+    return (await Promise.all(names.map((name) => readJson(join(dir, name))))).filter(Boolean);
+  } catch { return []; }
+}
+
+export function aliveProcess(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 export async function writeAtomic(path, value) {

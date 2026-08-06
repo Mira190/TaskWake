@@ -1,0 +1,32 @@
+{
+  "label": "baseline",
+  "at": "2026-08-06T13:10:49.202Z",
+  "node": "v22.22.2",
+  "fixture": {
+    "sessions": 30,
+    "transcriptKb": 200
+  },
+  "scenarios": [
+    {
+      "scenario": "cold-first-snapshot",
+      "reps": 25,
+      "meanMs": 110.95,
+      "p50Ms": 106.21,
+      "maxMs": 152.04
+    },
+    {
+      "scenario": "warm-idle",
+      "reps": 25,
+      "meanMs": 101.28,
+      "p50Ms": 97.82,
+      "maxMs": 133.34
+    },
+    {
+      "scenario": "warm-churn",
+      "reps": 25,
+      "meanMs": 102.32,
+      "p50Ms": 98.12,
+      "maxMs": 136.89
+    }
+  ]
+}

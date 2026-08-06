@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
-import { readdir, unlink } from 'node:fs/promises';
+import { unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -8,14 +8,7 @@ import { cleanId } from '../src/core.js';
 import { startDashboard } from '../src/dashboard.js';
 import { runCodex } from '../src/codex.js';
 import { locale, t } from '../src/i18n.js';
-import { doneDir, loadConfig, pendingDir, readJson, tailLog } from '../src/store.js';
-
-async function list(dir) {
-  try {
-    const names = (await readdir(dir)).filter((name) => name.endsWith('.json'));
-    return (await Promise.all(names.map((name) => readJson(join(dir, name))))).filter(Boolean);
-  } catch { return []; }
-}
+import { doneDir, listJson, loadConfig, pendingDir, tailLog } from '../src/store.js';
 
 const statusName = (status) => ({
   opened: t('opened in terminal', '已在终端打开'),
@@ -27,8 +20,8 @@ const statusName = (status) => ({
 
 async function status() {
   const config = await loadConfig();
-  const pending = await list(pendingDir);
-  const done = (await list(doneDir)).sort((a, b) => b.finishedAt - a.finishedAt).slice(0, 10);
+  const pending = await listJson(pendingDir);
+  const done = (await listJson(doneDir)).sort((a, b) => b.finishedAt - a.finishedAt).slice(0, 10);
   for (const item of pending) {
     const at = new Date(item.nextTry || (item.resetHint && item.resetHint + config.marginMs) || item.receivedAt).toLocaleString(locale);
     process.stdout.write(t(

@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -12,7 +12,7 @@ process.env.REWAKE_HOME = join(tmp, 'home');
 process.env.REWAKE_CONFIG = join(tmp, 'config.json');
 
 const { saveEvent, reconcile, ralph, trackSession } = await import('../src/hook.js');
-const { claimUsageProbe, recentResumeCount, wait } = await import('../src/waiter.js');
+const { claimUsageProbe, initialDeadline, recentResumeCount, wait } = await import('../src/waiter.js');
 const { home, pendingDir, doneDir, sessionsDir, loadConfig, readJson, writeAtomic } = await import('../src/store.js');
 const { defaults } = await import('../src/core.js');
 const { buildSnapshot, canOpenSession, startDashboard } = await import('../src/dashboard.js');
@@ -43,10 +43,13 @@ before(async () => {
   `);
   // A genuinely successful turn whose reply text legitimately discusses rate limits (e.g.
   // dogfooding taskwake, or writing a rate limiter) — must classify as resumed, not still-limited.
+  // The reply text deliberately contains "try again in ..." — a phrase failureKind matches.
+  // A well-formed non-error JSON result with exit 0 must be trusted without banner-scanning
+  // the reply; this exact sample was misclassified before classifyProbe existed.
   await writeFile(shimMentionsLimit, `
     process.stdout.write(JSON.stringify({
       type: 'result', is_error: false, num_turns: 4,
-      result: 'Implemented the rate limit backoff strategy from the ticket and added tests for it.',
+      result: 'Done. The retry helper now waits and will try again in 5 seconds when the queue is full.',
     }));
   `);
   await writeFile(shimBricked, `
@@ -233,6 +236,25 @@ describe('multi-session tracking and dashboard', () => {
     assert.equal(ended.status, 'ended');
     assert.equal(ended.reason, 'other');
   });
+
+  it('serves cached activity on idle polls but reflects new transcript rows immediately', async () => {
+    const transcript = join(tmp, 'cache-check.jsonl');
+    const toolRow = (command) => JSON.stringify({
+      type: 'assistant', timestamp: new Date().toISOString(),
+      message: { content: [{ type: 'tool_use', name: 'Bash', input: { command } }] },
+    }) + '\n';
+    await writeFile(transcript, toolRow('first command'));
+    await trackSession({ session_id: 'cache-check', cwd: join(tmp, 'cache-project'), transcript_path: transcript }, false, process.pid);
+    const first = await buildSnapshot();
+    const before = first.sessions.find((item) => item.session === 'cache-check');
+    assert.match(before.activity[0].detail, /first command/);
+    // mtime granularity can be coarse; wait long enough that the append changes it or size
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await appendFile(transcript, toolRow('second command'));
+    const second = await buildSnapshot();
+    const after = second.sessions.find((item) => item.session === 'cache-check');
+    assert.match(after.activity[0].detail, /second command/, 'the cache must invalidate when the transcript grows');
+  });
 });
 describe('Ralph loop', () => {
   it('continues every session when enabled and obeys done and turn limits', async () => {
@@ -343,6 +365,36 @@ describe('waiter end to end', () => {
     });
     const result = await wait('tok', { ...config([process.execPath, shimOk]), maxContextResumeTokens: 100 });
     assert.equal(result.status, 'skipped-context', '1000 bytes is far under maxContextResume but ~250 estimated tokens exceeds a 100-token ceiling');
+  });
+});
+
+describe('initial deadline trust', () => {
+  it('honours a machine-readable resetHint even when the details text cannot be re-parsed', () => {
+    const hint = Date.now() + 60_000;
+    const machine = initialDeadline({
+      details: '{"retry_after_seconds":60}', resetHint: hint, resetParsed: true, receivedAt: Date.now(),
+    }, { ...defaults, marginMs: 0 });
+    assert.equal(machine.trusted, true, 'retry_after_seconds-derived hint is trustworthy');
+    assert.equal(machine.deadline, hint);
+    const fallback = initialDeadline({
+      details: 'no parseable time here', resetHint: 0, resetParsed: false, receivedAt: Date.now(),
+    }, { ...defaults, marginMs: 0 });
+    assert.equal(fallback.trusted, false, 'an unparsed banner with no machine hint stays untrusted');
+  });
+});
+
+describe('usage gate release on skip', () => {
+  it('returns the gate quickly when an oversized session skips after claiming it', async () => {
+    await unlink(join(home, 'usage-gate.json')).catch(() => {});
+    await writeAtomic(join(pendingDir, 'gate-skip.json'), {
+      session: 'gate-skip', kind: 'usage', errorType: 'rate_limit',
+      details: 'session limit', resetHint: Date.now(), transcriptBytes: defaults.maxContextResume + 1,
+    });
+    const result = await wait('gate-skip', { ...config([process.execPath, shimOk]), usagePollMs: 3_600_000 });
+    assert.equal(result.status, 'skipped-context');
+    const gate = await readJson(join(home, 'usage-gate.json'));
+    assert.ok(gate.nextProbeAt <= Date.now() + 61_000, `gate must be freed within ~1 minute, was reserved until ${new Date(gate.nextProbeAt).toISOString()}`);
+    await unlink(join(home, 'usage-gate.json')).catch(() => {});
   });
 });
 

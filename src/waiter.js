@@ -5,8 +5,7 @@ import { mkdir, open, readdir, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
-  cleanId, estimateTokens, failureKind, isWeekly, looksBricked, looksIdle,
-  parseCliJsonResult, resetEpoch,
+  classifyProbe, cleanId, estimateTokens, isWeekly, looksBricked, looksIdle, resetEpoch,
 } from './core.js';
 import { t } from './i18n.js';
 import { canShowTerminal, doneDir, home, loadConfig, log, notify, openTerminal, pendingDir, readJson, runCommand, writeAtomic } from './store.js';
@@ -62,11 +61,15 @@ async function setUsageGate(session, nextProbeAt, result) {
   }));
 }
 
-function initialDeadline(state, config) {
+export function initialDeadline(state, config) {
   const now = state.receivedAt || Date.now();
   const parsed = resetEpoch(state.details, now, Number.NaN);
-  const trusted = Number.isFinite(parsed);
-  const hint = trusted ? parsed : (state.resetHint || now + config.fallbackMs);
+  // The hook may have computed resetHint from machine-readable data (error_details.
+  // retry_after_seconds) that the banner-text re-parse can't see. resetParsed marks that
+  // hint as trustworthy; without honouring it, an early probe at the hinted time would be
+  // treated as untrusted and burn an attempt even when the hint was exact.
+  const trusted = Number.isFinite(parsed) || Boolean(state.resetParsed && state.resetHint);
+  const hint = Number.isFinite(parsed) ? parsed : (state.resetHint || now + config.fallbackMs);
   return { deadline: hint + config.marginMs, trusted };
 }
 
@@ -167,6 +170,9 @@ export async function wait(session, config) {
       }
     }
     if (oversized) {
+      // The gate was just claimed for this probe slot; hand it back quickly instead of
+      // leaving it reserved for the full usagePollMs, which would starve other sessions.
+      if (wasUsage) await setUsageGate(session, Date.now() + CHUNK, 'skipped-context');
       notify('TaskWake', t(`Transcript too large for efficient headless resume. Reopen: claude --resume ${session}`, `会话记录过大，不适合无头续跑。重新打开：claude --resume ${session}`), config);
       return finish('skipped-context');
     }
@@ -195,16 +201,12 @@ export async function wait(session, config) {
       return finish('bricked', { attempts: state.probes });
     }
 
-    // Classify from the structured --output-format json result when available, scanning only
-    // the model's final reply text plus stderr — not the whole raw output — so a successful
-    // continuation that legitimately mentions "rate limit" or "try again" (dogfooding
-    // TaskWake, writing a rate limiter, test output, ...) is never misread as still-limited.
-    // Falls back to a full raw-text scan when stdout isn't a parseable JSON result (older CLI,
-    // or a hard failure that never printed one).
-    const parsedResult = parseCliJsonResult(result.stdout);
-    const scanText = parsedResult ? `${parsedResult.resultText}\n${result.stderr}` : combined;
-    const kind = failureKind(scanText);
-    if (result.code === 0 && !parsedResult?.isError && !kind) {
+    // classifyProbe (core.js) is the single source of truth: a well-formed non-error JSON
+    // result with exit 0 is success outright — its reply text is never banner-scanned, so a
+    // continuation that legitimately says "try again in 5 seconds" can't be misread as
+    // still-limited. Raw-text scanning remains only for non-JSON output and failures.
+    const { verdict, kind, parsed: parsedResult } = classifyProbe(result);
+    if (verdict === 'resumed') {
       if (wasUsage) await setUsageGate(session, Date.now() + config.usageResumeSpacingMs, 'resumed');
       const idle = looksIdle(parsedResult?.resultText || '');
       notify('TaskWake', idle

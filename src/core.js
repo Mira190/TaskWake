@@ -73,6 +73,37 @@ export function parseCliJsonResult(stdout = '') {
   };
 }
 
+// Single source of truth for judging a finished resume probe (shared by the waiter and the
+// benchmark harness). A well-formed non-error JSON result with exit 0 is a success outright —
+// the reply text is NEVER banner-scanned then, because a successful turn may legitimately say
+// "try again in 5 seconds" while describing its own work. Banner regexes only apply to
+// failures and to raw (non-JSON) output from older CLIs.
+export function classifyProbe({ code, stdout = '', stderr = '' }) {
+  const parsed = parseCliJsonResult(stdout);
+  if (parsed && code === 0 && !parsed.isError) return { verdict: 'resumed', kind: undefined, parsed };
+  const scanText = parsed ? `${parsed.resultText}\n${stderr}` : `${stdout}\n${stderr}`;
+  const kind = failureKind(scanText);
+  if (code === 0 && !kind && !parsed?.isError) return { verdict: 'resumed', kind: undefined, parsed };
+  return { verdict: kind === 'usage' ? 'still-limited' : kind === 'overload' ? 'overload' : 'other-failure', kind, parsed };
+}
+
+// Incremental scanner for a live `codex exec --json` stream. Chunk boundaries can split a
+// JSONL line (e.g. thread.started arriving as two data events), so the thread id must be
+// re-scanned from the accumulated tail, never from a single chunk.
+export function codexStreamScanner(limit = 65_536) {
+  let tail = '';
+  let thread = null;
+  return {
+    push(part) {
+      tail = (tail + part).slice(-limit);
+      thread ||= readCodexJson(tail).thread;
+      return thread;
+    },
+    get tail() { return tail; },
+    get thread() { return thread; },
+  };
+}
+
 const usageWords = [
   /\b\d+-hour limit\b/i,
   /\b(?:usage|session|weekly) limit\b/i,

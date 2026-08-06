@@ -6,24 +6,16 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { cleanId, pathsOverlap } from './core.js';
 import { t } from './i18n.js';
-import { home, pendingDir, doneDir, sessionsDir, loadConfig, log, openTerminal, readJson, tailLog } from './store.js';
+import { aliveProcess, home, pendingDir, doneDir, sessionsDir, listJson, loadConfig, log, openTerminal, readJson, tailLog } from './store.js';
 import { dashboardPage } from './dashboard-page.js';
 
 const ralphDir = join(home, 'ralph');
 const transcriptCache = new Map();
+const activityCache = new Map();
+let projectListing = { names: null, at: 0 };
 const opening = new Set();
 
-async function listJson(dir) {
-  try {
-    const names = (await readdir(dir)).filter((name) => name.endsWith('.json'));
-    return (await Promise.all(names.map((name) => readJson(join(dir, name))))).filter(Boolean);
-  } catch { return []; }
-}
-
-function alive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
+const alive = aliveProcess;
 
 const compact = (value, max = 360) => String(value || '').replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
 
@@ -33,9 +25,14 @@ async function findTranscript(session) {
   let path;
   try {
     const root = join(homedir(), '.claude', 'projects');
-    const names = await readdir(root, { recursive: true });
+    // The recursive listing is the expensive part and is identical for every session in a
+    // snapshot, so it is shared across sessions and refreshed at most once per minute —
+    // previously each uncached session walked the whole ~/.claude/projects tree by itself.
+    if (!projectListing.names || Date.now() - projectListing.at > 60_000) {
+      projectListing = { names: await readdir(root, { recursive: true }), at: Date.now() };
+    }
     const suffix = `${session}.jsonl`.toLowerCase();
-    const match = names.find((name) => String(name).toLowerCase().endsWith(suffix));
+    const match = projectListing.names.find((name) => String(name).toLowerCase().endsWith(suffix));
     if (match) path = join(root, match);
   } catch { /* Claude storage is optional */ }
   transcriptCache.set(session, { path, at: Date.now() });
@@ -61,7 +58,23 @@ function toolDetail(block) {
   return compact(input.description || input.command || input.file_path || input.path || input.pattern || input.query || Object.values(input).find((value) => typeof value === 'string'));
 }
 
-async function readActivity(path) {
+// The dashboard polls every 2 seconds, and between most polls no transcript has changed —
+// re-reading and re-parsing a 160 KB tail per session per poll is pure waste. Cache parsed
+// events keyed by the stat the caller already took; re-read only when mtime or size moved.
+async function readActivity(path, statInfo) {
+  if (statInfo) {
+    const cached = activityCache.get(path);
+    if (cached && cached.mtimeMs === statInfo.mtimeMs && cached.size === statInfo.size) return cached.events;
+  }
+  const events = await parseActivity(path);
+  if (statInfo) {
+    if (activityCache.size > 1_000) activityCache.clear(); // blunt bound; entries are tiny
+    activityCache.set(path, { mtimeMs: statInfo.mtimeMs, size: statInfo.size, events });
+  }
+  return events;
+}
+
+async function parseActivity(path) {
   const raw = await tailText(path);
   if (!raw) return [];
   const events = [];
@@ -115,9 +128,10 @@ export async function buildSnapshot() {
   for (const item of map.values()) {
     const source = item.pending || item.registry || item.done || {};
     const transcriptPath = source.transcriptPath || item.registry?.transcriptPath || item.done?.transcriptPath || await findTranscript(item.session);
-    const activity = await readActivity(transcriptPath);
-    let transcriptAt = 0;
-    try { transcriptAt = (await stat(transcriptPath)).mtimeMs; } catch { /* no transcript */ }
+    let statInfo;
+    try { statInfo = transcriptPath ? await stat(transcriptPath) : undefined; } catch { /* no transcript */ }
+    const activity = await readActivity(transcriptPath, statInfo);
+    const transcriptAt = statInfo?.mtimeMs || 0;
     const updatedAt = Math.max(transcriptAt,
       item.registry?.updatedAt || 0, item.pending?.nextTry || 0, item.pending?.receivedAt || 0,
       item.done?.finishedAt || 0, item.ralph?.updatedAt || 0,

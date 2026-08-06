@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readdir, stat, unlink } from 'node:fs/promises';
 import { cleanId, resetEpoch } from './core.js';
 import { t } from './i18n.js';
-import { loadConfig, log, pendingDir, readJson, sessionsDir, writeAtomic } from './store.js';
+import { aliveProcess, loadConfig, log, pendingDir, readJson, sessionsDir, writeAtomic } from './store.js';
 
 const kinds = { rate_limit: 'usage', overloaded: 'overload', server_error: 'overload' };
 const ralphFile = (session) => join(dirname(pendingDir), 'ralph', `${cleanId(session)}.json`);
@@ -95,10 +95,6 @@ export function startWaiter(session) {
   });
   child.once('error', () => {});
   child.unref();
-}
-
-function aliveProcess(pid) {
-  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 // Re-arm waiters orphaned by a reboot or logout. Runs from the SessionStart hook,

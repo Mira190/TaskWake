@@ -1,28 +1,27 @@
 // Codex batch path: `taskwake run codex exec …` — stream output through live while
 // scanning a rolling tail for usage failures, then resume the exact thread.
-import { codexResumeArgs, failureKind, jsonCodexArgs, readCodexJson, resetEpoch } from './core.js';
+import { codexResumeArgs, codexStreamScanner, failureKind, jsonCodexArgs, resetEpoch } from './core.js';
 import { locale, t } from './i18n.js';
 import { shellSpawn } from './store.js';
 
-const TAIL = 65_536;
 const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-// Pass chunks through live while keeping a bounded tail
-// for failure detection and capturing the thread id the moment it appears.
+// Pass chunks through live while keeping a bounded tail for failure detection. The thread id
+// is re-scanned from the accumulated tail (codexStreamScanner), never from a lone chunk —
+// a JSONL line split across two data events would otherwise lose the thread id and make the
+// later resume fall back to --last, which can grab the wrong thread.
 function streamCodex(args) {
   return new Promise((resolve) => {
     const child = shellSpawn(['codex', ...args], { stdio: ['inherit', 'pipe', 'pipe'] });
-    let tail = '';
-    let thread = null;
+    const scanner = codexStreamScanner();
     const watch = (target) => (part) => {
       target.write(part);
-      tail = (tail + part).slice(-TAIL);
-      thread ||= readCodexJson(String(part)).thread;
+      scanner.push(String(part));
     };
     child.stdout.on('data', watch(process.stdout));
     child.stderr.on('data', watch(process.stderr));
-    child.once('error', (error) => { process.stderr.write(`${error.message}\n`); resolve({ code: 1, tail, thread }); });
-    child.once('exit', (code) => resolve({ code: code ?? 1, tail, thread }));
+    child.once('error', (error) => { process.stderr.write(`${error.message}\n`); resolve({ code: 1, tail: scanner.tail, thread: scanner.thread }); });
+    child.once('exit', (code) => resolve({ code: code ?? 1, tail: scanner.tail, thread: scanner.thread }));
   });
 }
 

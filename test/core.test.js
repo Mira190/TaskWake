@@ -2,8 +2,9 @@ import { strict as assert } from 'node:assert';
 import { readFile } from 'node:fs/promises';
 import { describe, it } from 'node:test';
 import {
-  codexExecIndex, codexResumeArgs, estimateTokens, failureKind, isWeekly,
-  jsonCodexArgs, looksBricked, looksIdle, parseCliJsonResult, readCodexJson, resetEpoch,
+  classifyProbe, codexExecIndex, codexResumeArgs, codexStreamScanner, estimateTokens,
+  failureKind, isWeekly, jsonCodexArgs, looksBricked, looksIdle, parseCliJsonResult,
+  readCodexJson, resetEpoch,
 } from '../src/core.js';
 import { dashboardPage } from '../src/dashboard-page.js';
 import { isChineseLocale } from '../src/i18n.js';
@@ -143,6 +144,46 @@ describe('structured CLI result parsing', () => {
     assert.equal(parseCliJsonResult('plain text output'), null);
     assert.equal(parseCliJsonResult('{not valid json'), null);
     assert.equal(parseCliJsonResult('null'), null);
+  });
+});
+
+describe('probe classification (classifyProbe)', () => {
+  it('trusts a non-error JSON result with exit 0 without banner-scanning the reply text', () => {
+    const { verdict } = classifyProbe({
+      code: 0,
+      stdout: JSON.stringify({ type: 'result', is_error: false, result: 'Done. Will try again in 5 seconds when the queue is full.' }),
+      stderr: '',
+    });
+    assert.equal(verdict, 'resumed', 'reply text discussing retries must not be misread as a limit');
+  });
+
+  it('classifies limit banners inside an error result and in raw output', () => {
+    assert.equal(classifyProbe({
+      code: 1,
+      stdout: JSON.stringify({ type: 'result', is_error: true, result: "You've hit your session limit · resets 4pm" }),
+    }).verdict, 'still-limited');
+    assert.equal(classifyProbe({ code: 1, stdout: "You've hit your session limit · resets 4pm" }).verdict, 'still-limited');
+    assert.equal(classifyProbe({ code: 1, stdout: '', stderr: 'API Error 529: service overloaded' }).verdict, 'overload');
+    assert.equal(classifyProbe({ code: 1, stdout: 'segfault' }).verdict, 'other-failure');
+  });
+});
+
+describe('codex stream scanning', () => {
+  it('finds the thread id even when the JSONL line is split across chunks', () => {
+    const line = JSON.stringify({ type: 'thread.started', thread_id: 'split-thread' }) + '\n';
+    const scanner = codexStreamScanner();
+    scanner.push(line.slice(0, 18));
+    assert.equal(scanner.thread, null, 'half a line is not yet a thread id');
+    scanner.push(line.slice(18));
+    assert.equal(scanner.thread, 'split-thread');
+  });
+
+  it('keeps only the bounded tail while preserving an already-captured thread', () => {
+    const scanner = codexStreamScanner(64);
+    scanner.push(JSON.stringify({ type: 'thread.started', thread_id: 'early' }) + '\n');
+    scanner.push('x'.repeat(500));
+    assert.equal(scanner.thread, 'early', 'thread survives tail truncation');
+    assert.ok(scanner.tail.length <= 64);
   });
 });
 

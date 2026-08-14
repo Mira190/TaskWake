@@ -17,9 +17,12 @@ Newest first. Each entry: what was decided, why, and what would reverse it.
 0c. **Gate handback times are bounded by the configured cadence**
     (`min(CHUNK, usagePollMs)`), after the review pass's absolute `+60s` handback stalled
     short-cadence configurations (KNOWN_FAILURES #3).
-0d. **Resumed done-records carry `numTurns`/`costUsd` from the CLI result JSON**, surfaced
-    in the notification and `taskwake status` — the cheap slice of "verified resume";
-    files-changed/tools-used reporting remains open (NEXT_STEPS).
+0d. **Resumed done-records carry `numTurns`/`costUsd` from the CLI result JSON and a
+    `workspaceChanged` verdict** (git fingerprint before vs after the probe — hard evidence
+    that complements the `looksIdle` text heuristic), surfaced in the notification and
+    `taskwake status`. The pre-probe fingerprint is captured before `runCommand` even under
+    `workspacePolicy: "ignore"` — a post-probe capture would compare a value to itself.
+    Tools-used reporting remains open (NEXT_STEPS).
 0e. **`done/` records pruned after 30 days during `reconcile`** — generous floor above the
     7-day ceiling window; event-driven like everything else, no timer.
 0f. **`npm run lint`** = `node --check` over all JS plus a `vm.Script` parse of the

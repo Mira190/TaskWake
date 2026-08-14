@@ -471,6 +471,19 @@ describe('workspace fingerprint hold', () => {
     await writeAtomic(join(pendingDir, 'ws-same.json'), pendingRecord('ws-same', repo, fingerprint));
     const unchanged = await wait('ws-same', config([process.execPath, shimOk]));
     assert.equal(unchanged.status, 'resumed', 'an unchanged workspace resumes normally');
+    assert.equal(unchanged.workspaceChanged, false, 'a probe that wrote nothing reports no file changes');
+
+    const shimWrites = join(tmp, 'shim-writes.mjs');
+    await writeFile(shimWrites, `
+      import { writeFile } from 'node:fs/promises';
+      await writeFile('probe-artifact.txt', 'created by the continuation\\n');
+      process.stdout.write('{"type":"result","is_error":false,"num_turns":2,"result":"ok"}');
+    `);
+    await writeAtomic(join(pendingDir, 'ws-wrote.json'), pendingRecord('ws-wrote', repo, fingerprint));
+    const wrote = await wait('ws-wrote', config([process.execPath, shimWrites]));
+    assert.equal(wrote.status, 'resumed');
+    assert.equal(wrote.workspaceChanged, true, 'a probe that wrote into the repo reports file changes');
+    await unlink(join(repo, 'probe-artifact.txt')).catch(() => {});
 
     await writeFile(join(repo, 'file.txt'), 'v2 dirty\n');
     await writeAtomic(join(pendingDir, 'ws-changed.json'), pendingRecord('ws-changed', repo, fingerprint));

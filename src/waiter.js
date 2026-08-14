@@ -163,8 +163,9 @@ export async function wait(session, config) {
     // commits, a pull, another agent), continuing blindly may act on assumptions that no
     // longer hold. Default is to hand back to the human; `workspacePolicy: "ignore"` opts out.
     // Both fingerprints must exist for a verdict — an unfingerprintable workspace never holds.
+    let preProbeWorkspace;
     if (state.workspace && config.workspacePolicy !== 'ignore') {
-      const currentWorkspace = await workspaceFingerprint(state.cwd);
+      const currentWorkspace = preProbeWorkspace = await workspaceFingerprint(state.cwd);
       if (currentWorkspace && currentWorkspace !== state.workspace) {
         if (wasUsage) await setUsageGate(session, Date.now() + Math.min(CHUNK, config.usagePollMs), 'workspace-changed');
         notify('TaskWake', t(
@@ -194,6 +195,12 @@ export async function wait(session, config) {
       return finish('skipped-context');
     }
 
+    // Must be captured BEFORE the probe runs (the hold check may have skipped it under
+    // workspacePolicy: "ignore"); comparing a post-probe value to itself would always
+    // report "no file changes".
+    if (state.workspace && preProbeWorkspace === undefined) {
+      preProbeWorkspace = await workspaceFingerprint(state.cwd);
+    }
     state.probes++;
     await log(`probe session=${session} probe=${state.probes} failures=${state.attempts}`);
     const result = await runCommand(
@@ -226,11 +233,18 @@ export async function wait(session, config) {
     if (verdict === 'resumed') {
       if (wasUsage) await setUsageGate(session, Date.now() + config.usageResumeSpacingMs, 'resumed');
       const idle = looksIdle(parsedResult?.resultText || '');
+      // Hard evidence of work: fingerprint the workspace around the probe. Only meaningful
+      // when the session was fingerprintable at interruption; complements the looksIdle
+      // text heuristic with an observation the model can't phrase its way around.
+      const afterProbe = preProbeWorkspace ? await workspaceFingerprint(state.cwd) : undefined;
+      const workspaceChanged = preProbeWorkspace && afterProbe ? afterProbe !== preProbeWorkspace : undefined;
       // Say what the continuation actually did, not just that it ran: turns and cost come
       // from the CLI's own result JSON, so the user can judge whether the resume was worth it.
       const facts = [
         parsedResult?.numTurns !== undefined ? t(`${parsedResult.numTurns} turns`, `${parsedResult.numTurns} 轮`) : '',
         parsedResult?.totalCostUsd !== undefined ? `$${parsedResult.totalCostUsd.toFixed(2)}` : '',
+        workspaceChanged === true ? t('files changed', '已修改文件')
+          : workspaceChanged === false ? t('no file changes', '未修改文件') : '',
       ].filter(Boolean).join(', ');
       const summary = facts ? ` (${facts})` : '';
       notify('TaskWake', idle
@@ -240,6 +254,7 @@ export async function wait(session, config) {
         attempts: state.probes,
         ...(parsedResult?.numTurns !== undefined ? { numTurns: parsedResult.numTurns } : {}),
         ...(parsedResult?.totalCostUsd !== undefined ? { costUsd: parsedResult.totalCostUsd } : {}),
+        ...(workspaceChanged !== undefined ? { workspaceChanged } : {}),
       });
     }
 

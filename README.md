@@ -150,9 +150,10 @@ quota. Defaults:
   waiting, the resume is held and you are notified instead
   (`workspacePolicy: "ignore"` to disable) — an hours-later continuation
   should not act on assumptions that no longer hold.
-- Successful resumes report what they cost: turn count and dollar figure
-  from the CLI's own result JSON appear in the notification and in
-  `taskwake status`.
+- Successful resumes report what they actually did: turn count and dollar
+  figure from the CLI's own result JSON, plus whether any files changed in
+  the workspace (git-fingerprinted before and after the continuation),
+  appear in the notification and in `taskwake status`.
 
 ## Commands
 

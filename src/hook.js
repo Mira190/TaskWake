@@ -7,25 +7,55 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readdir, stat, unlink } from 'node:fs/promises';
 import { cleanId, resetEpoch } from './core.js';
 import { t } from './i18n.js';
-import { loadConfig, log, pendingDir, readJson, sessionsDir, writeAtomic } from './store.js';
+import { aliveProcess, loadConfig, log, pendingDir, readJson, sessionsDir, workspaceFingerprint, writeAtomic } from './store.js';
 
 const kinds = { rate_limit: 'usage', overloaded: 'overload', server_error: 'overload' };
 const ralphFile = (session) => join(dirname(pendingDir), 'ralph', `${cleanId(session)}.json`);
 
+// Documented StopFailure schema: `error_type` is the matcher token (e.g. "rate_limit"),
+// `error` is a human-readable message, `error_details` is an object (may carry
+// `retry_after_seconds`). Older/altered emitters have been seen putting the token itself in
+// `error` with no `error_type` — so error_type is preferred, but a token-shaped `error` still
+// resolves, and a message-shaped `error` is only ever used as free text, never as the type.
+function classifyError(input) {
+  const byType = kinds[input?.error_type];
+  if (byType) return byType;
+  const byError = kinds[input?.error];
+  if (byError) return byError;
+  const haystack = `${input?.error_type ?? ''} ${input?.error ?? ''}`;
+  for (const [token, kind] of Object.entries(kinds)) {
+    if (haystack.includes(token)) return kind;
+  }
+  return undefined;
+}
+
 export async function saveEvent(input) {
-  const errorType = input?.error ?? input?.error_type;
-  const kind = kinds[errorType];
+  const kind = classifyError(input);
   const session = input?.session_id;
   if (!kind || !session) return undefined;
   const file = join(pendingDir, `${cleanId(session)}.json`);
   if (await readJson(file)) return undefined; // a waiter is already pending for this session
-  const text = [input.error_details, input.last_assistant_message].filter(Boolean).join('\n');
-  const parsedReset = kind === 'usage' ? resetEpoch(text, Date.now(), Number.NaN) : Number.NaN;
+  const details = input?.error_details;
+  const detailsText = typeof details === 'string' ? details
+    : (details && typeof details === 'object') ? JSON.stringify(details) : undefined;
+  const errorMessage = typeof input?.error === 'string' && input.error !== input?.error_type ? input.error : undefined;
+  const text = [detailsText, errorMessage, input.last_assistant_message].filter(Boolean).join('\n');
+  const retryAfterSeconds = details && typeof details === 'object' && Number.isFinite(details.retry_after_seconds)
+    ? details.retry_after_seconds : undefined;
+  const parsedReset = kind !== 'usage' ? Number.NaN
+    : retryAfterSeconds !== undefined ? Date.now() + retryAfterSeconds * 1_000
+    : resetEpoch(text, Date.now(), Number.NaN);
+  const errorType = input?.error_type ?? input?.error;
   let transcriptBytes = 0;
   try { transcriptBytes = (await stat(input.transcript_path)).size; } catch { /* no transcript */ }
+  // Captured now so the waiter can detect the repo changing under it while it waited
+  // (user commits, a colleague's push pulled in, another agent's edits). undefined when
+  // cwd is not a git repo — then no comparison ever happens.
+  const workspace = await workspaceFingerprint(input.cwd);
   const record = {
     session,
     cwd: input.cwd,
+    ...(workspace ? { workspace } : {}),
     transcriptPath: input.transcript_path,
     kind,
     errorType,
@@ -72,13 +102,31 @@ export function startWaiter(session) {
   child.unref();
 }
 
-function aliveProcess(pid) {
-  try { process.kill(pid, 0); return true; } catch { return false; }
+const DONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+
+// done/ records feed `taskwake status`, the dashboard, and the weekly resume ceiling;
+// nothing needs them beyond the ceiling's 7-day window, so 30 days is a generous floor.
+// Piggybacks on reconcile so pruning is event-driven like everything else — no timer.
+async function pruneDone(now = Date.now()) {
+  const dir = join(dirname(pendingDir), 'done');
+  let names = [];
+  try { names = (await readdir(dir)).filter((name) => name.endsWith('.json')); } catch { return 0; }
+  let pruned = 0;
+  for (const name of names) {
+    const record = await readJson(join(dir, name));
+    if (record && Number.isFinite(record.finishedAt) && now - record.finishedAt > DONE_RETENTION_MS) {
+      await unlink(join(dir, name)).catch(() => {});
+      pruned++;
+    }
+  }
+  if (pruned) await log(`pruned ${pruned} done records older than 30d`);
+  return pruned;
 }
 
 // Re-arm waiters orphaned by a reboot or logout. Runs from the SessionStart hook,
 // so recovery is event-driven: no daemon, no timer to install or repair.
 export async function reconcile() {
+  await pruneDone();
   let names = [];
   try { names = (await readdir(pendingDir)).filter((name) => name.endsWith('.json')); } catch { return 0; }
   let spawned = 0;
@@ -98,7 +146,9 @@ export async function reconcile() {
 export async function ralph(input, config) {
   const session = input?.session_id;
   if (!session) return undefined;
-  config ||= await loadConfig();
+  // cwd-aware so a project can opt in/out via a local .taskwake.json even when the
+  // global ~/.taskwake.json sets ralph for every session on the machine.
+  config ||= await loadConfig(input?.cwd);
   if (!config.ralph) return undefined;
   const file = ralphFile(session);
   const previous = await readJson(file);
@@ -111,11 +161,12 @@ export async function ralph(input, config) {
   }
   await writeAtomic(file, { session, turns, updatedAt: Date.now() });
   await log(`ralph continued session=${session} turn=${turns}`);
+  const taskFiles = config.ralphTaskFiles.join(t(', ', '、'));
   return {
     decision: 'block',
     reason: t(
-      `Ralph loop turn ${turns}/${config.ralphMaxTurns}: continue autonomously. Finish and verify the current task. If complete, inspect TODO.md, REVIEW_AND_HANDOFF.md, GAME_DESIGN.md, tests, and the working tree; execute the highest-priority safe local task already implied by them. Make reversible project-local choices without asking. Do not invent scope, modify global Claude settings, deploy, publish, push, change credentials, spend money, or terminate processes you did not start. Never mass-kill by process name. When no safe local task remains, end with [RALPH_DONE].`,
-      `Ralph 循环 ${turns}/${config.ralphMaxTurns}：自主继续。完成并验证当前任务；如果已经完成，请检查 TODO.md、REVIEW_AND_HANDOFF.md、GAME_DESIGN.md、测试和工作树，执行其中已明确的最高优先级安全本地任务。对可逆的项目内选择自行决定，无需询问。不得擅自扩大范围、修改 Claude 全局设置、部署、发布、推送、修改凭据、花费资金或终止本轮未启动的进程；不得按进程名批量终止。没有安全本地任务时以 [RALPH_DONE] 结束。`,
+      `Ralph loop turn ${turns}/${config.ralphMaxTurns}: continue autonomously. Finish and verify the current task. If complete, inspect ${taskFiles}, tests, and the working tree; execute the highest-priority safe local task already implied by them. Make reversible project-local choices without asking. Do not invent scope, modify global Claude settings, deploy, publish, push, change credentials, spend money, or terminate processes you did not start. Never mass-kill by process name. When no safe local task remains, end with [RALPH_DONE].`,
+      `Ralph 循环 ${turns}/${config.ralphMaxTurns}：自主继续。完成并验证当前任务；如果已经完成，请检查 ${taskFiles}、测试和工作树，执行其中已明确的最高优先级安全本地任务。对可逆的项目内选择自行决定，无需询问。不得擅自扩大范围、修改 Claude 全局设置、部署、发布、推送、修改凭据、花费资金或终止本轮未启动的进程；不得按进程名批量终止。没有安全本地任务时以 [RALPH_DONE] 结束。`,
     ),
   };
 }

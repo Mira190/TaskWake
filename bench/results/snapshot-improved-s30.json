@@ -1,0 +1,32 @@
+{
+  "label": "improved",
+  "at": "2026-08-06T13:17:06.367Z",
+  "node": "v22.22.2",
+  "fixture": {
+    "sessions": 30,
+    "transcriptKb": 200
+  },
+  "scenarios": [
+    {
+      "scenario": "cold-first-snapshot",
+      "reps": 25,
+      "meanMs": 11.04,
+      "p50Ms": 6.59,
+      "maxMs": 102.79
+    },
+    {
+      "scenario": "warm-idle",
+      "reps": 25,
+      "meanMs": 6.8,
+      "p50Ms": 6.26,
+      "maxMs": 9.7
+    },
+    {
+      "scenario": "warm-churn",
+      "reps": 25,
+      "meanMs": 9.02,
+      "p50Ms": 8.98,
+      "maxMs": 10.31
+    }
+  ]
+}

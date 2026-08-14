@@ -1,0 +1,39 @@
+{
+  "label": "baseline",
+  "at": "2026-08-06T13:10:41.126Z",
+  "node": "v22.22.2",
+  "classification": {
+    "kindAccuracy": "22/22",
+    "weeklyAccuracy": "22/22",
+    "parseRecall": "13/13",
+    "benignFalsePositives": "5/8"
+  },
+  "strategies": {
+    "raw": {
+      "correct": 4,
+      "total": 5,
+      "misses": [
+        {
+          "name": "success-discussing-limits",
+          "expected": "resumed",
+          "got": "still-limited"
+        }
+      ]
+    },
+    "structured": {
+      "correct": 4,
+      "total": 5,
+      "misses": [
+        {
+          "name": "success-discussing-limits",
+          "expected": "resumed",
+          "got": "still-limited"
+        }
+      ]
+    }
+  },
+  "throughput": {
+    "failureKindOpsPerSec": 3341565,
+    "resetEpochOpsPerSec": 3994
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "comment": "Evaluation corpus for failure classification and reset parsing. `banners` are provider limit/overload messages with expected labels (kind: usage|overload|null, weekly, parses). `benign` are outputs a SUCCESSFUL resumed turn could legitimately produce; any non-null classification on them is a false positive. `structured` are full --output-format json stdout samples with the correct end-to-end verdict for the waiter's classification strategies.",
+  "banners": [
+    { "text": "You've hit your session limit · resets 6:50pm (Europe/London)", "kind": "usage", "parses": true },
+    { "text": "You've hit your session limit · resets 12:10am (Europe/Dublin)", "kind": "usage", "parses": true },
+    { "text": "5-hour limit reached - resets 3pm", "kind": "usage", "parses": true },
+    { "text": "Claude usage limit reached. Resets at 2pm", "kind": "usage", "parses": true },
+    { "text": "You're out of extra usage · resets 3pm", "kind": "usage", "parses": true },
+    { "text": "Please try again in 5 hours", "kind": "usage", "parses": true },
+    { "text": "Rate limit hit. Resets at 4pm", "kind": "usage", "parses": true },
+    { "text": "usage limit · resets in: 3 hours", "kind": "usage", "parses": true },
+    { "text": "You've hit your weekly limit · resets Jul 24, 2030 at 10:00 AM UTC", "kind": "usage", "weekly": true, "parses": true },
+    { "text": "try again at Jul 5th, 2030 4:09 PM UTC", "kind": "usage", "parses": true },
+    { "text": "You've hit your 5-hour limit · resets 11:30pm (America/New_York)", "kind": "usage", "parses": true },
+    { "text": "Session limit reached · try again in 45 minutes", "kind": "usage", "parses": true },
+    { "text": "Rate limit reached ... your limit will reset at 7am (UTC)", "kind": "usage", "parses": true },
+    { "text": "API Error 529: service overloaded", "kind": "overload" },
+    { "text": "API Error: 429 rate limited", "kind": "overload" },
+    { "text": "overloaded_error: upstream is saturated", "kind": "overload" },
+    { "text": "server_error: internal failure, please retry", "kind": "overload" },
+    { "text": "API Error: 503 upstream connect error", "kind": "overload" },
+    { "text": "We are temporarily limiting requests to manage load", "kind": "overload" },
+    { "text": "Rate limit exceeded. Please wait before retrying.", "kind": null },
+    { "text": "All tests passed, 42 assertions", "kind": null },
+    { "text": "The word reset appears in this sentence about form resets", "kind": null }
+  ],
+  "benign": [
+    { "text": "Implemented the rate limit backoff strategy from the ticket and added tests for it." },
+    { "text": "Done. The retry helper now waits and will try again in 5 seconds when the queue is full." },
+    { "text": "I refactored resetEpoch; the parser now handles 'usage limit' banners and their reset times." },
+    { "text": "Fixed the bug: the session limit constant was off by one; all 12 tests pass." },
+    { "text": "Added docs explaining the weekly limit policy and when TaskWake resets its counters." },
+    { "text": "The load test hit the nginx rate limiter as expected; requests reset after the window." },
+    { "text": "Wrote a unit test that asserts we try again at the parsed timestamp." },
+    { "text": "Note: HTTP 429 responses from the mock server are expected in this fixture." }
+  ],
+  "structured": [
+    {
+      "name": "success-discussing-limits",
+      "code": 0,
+      "stdout": "{\"type\":\"result\",\"is_error\":false,\"num_turns\":4,\"result\":\"Done. The retry helper now waits and will try again in 5 seconds when the queue is full.\"}",
+      "stderr": "",
+      "verdict": "resumed"
+    },
+    {
+      "name": "success-plain",
+      "code": 0,
+      "stdout": "{\"type\":\"result\",\"is_error\":false,\"num_turns\":2,\"result\":\"Refactored the module and verified the build.\"}",
+      "stderr": "",
+      "verdict": "resumed"
+    },
+    {
+      "name": "still-limited-json",
+      "code": 1,
+      "stdout": "{\"type\":\"result\",\"is_error\":true,\"subtype\":\"error_during_execution\",\"result\":\"You've hit your session limit · resets 6:50pm (Europe/London)\"}",
+      "stderr": "",
+      "verdict": "still-limited"
+    },
+    {
+      "name": "still-limited-raw",
+      "code": 1,
+      "stdout": "You've hit your session limit · resets 4pm",
+      "stderr": "",
+      "verdict": "still-limited"
+    },
+    {
+      "name": "overload-stderr",
+      "code": 1,
+      "stdout": "",
+      "stderr": "API Error 529: service overloaded",
+      "verdict": "overload"
+    }
+  ]
+}

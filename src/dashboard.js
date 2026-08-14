@@ -1,28 +1,21 @@
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { open, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { cleanId, pathsOverlap } from './core.js';
+import { cleanId, pathsOverlap, statusPriority } from './core.js';
 import { t } from './i18n.js';
-import { home, pendingDir, doneDir, sessionsDir, loadConfig, log, openTerminal, readJson, tailLog } from './store.js';
+import { aliveProcess, home, pendingDir, doneDir, sessionsDir, listJson, loadConfig, log, openTerminal, readJson, tailLog } from './store.js';
 import { dashboardPage } from './dashboard-page.js';
 
 const ralphDir = join(home, 'ralph');
 const transcriptCache = new Map();
+const activityCache = new Map();
+let projectListing = { names: null, at: 0 };
 const opening = new Set();
 
-async function listJson(dir) {
-  try {
-    const names = (await readdir(dir)).filter((name) => name.endsWith('.json'));
-    return (await Promise.all(names.map((name) => readJson(join(dir, name))))).filter(Boolean);
-  } catch { return []; }
-}
-
-function alive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
+const alive = aliveProcess;
 
 const compact = (value, max = 360) => String(value || '').replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
 
@@ -32,9 +25,14 @@ async function findTranscript(session) {
   let path;
   try {
     const root = join(homedir(), '.claude', 'projects');
-    const names = await readdir(root, { recursive: true });
+    // The recursive listing is the expensive part and is identical for every session in a
+    // snapshot, so it is shared across sessions and refreshed at most once per minute —
+    // previously each uncached session walked the whole ~/.claude/projects tree by itself.
+    if (!projectListing.names || Date.now() - projectListing.at > 60_000) {
+      projectListing = { names: await readdir(root, { recursive: true }), at: Date.now() };
+    }
     const suffix = `${session}.jsonl`.toLowerCase();
-    const match = names.find((name) => String(name).toLowerCase().endsWith(suffix));
+    const match = projectListing.names.find((name) => String(name).toLowerCase().endsWith(suffix));
     if (match) path = join(root, match);
   } catch { /* Claude storage is optional */ }
   transcriptCache.set(session, { path, at: Date.now() });
@@ -60,7 +58,23 @@ function toolDetail(block) {
   return compact(input.description || input.command || input.file_path || input.path || input.pattern || input.query || Object.values(input).find((value) => typeof value === 'string'));
 }
 
-async function readActivity(path) {
+// The dashboard polls every 2 seconds, and between most polls no transcript has changed —
+// re-reading and re-parsing a 160 KB tail per session per poll is pure waste. Cache parsed
+// events keyed by the stat the caller already took; re-read only when mtime or size moved.
+async function readActivity(path, statInfo) {
+  if (statInfo) {
+    const cached = activityCache.get(path);
+    if (cached && cached.mtimeMs === statInfo.mtimeMs && cached.size === statInfo.size) return cached.events;
+  }
+  const events = await parseActivity(path);
+  if (statInfo) {
+    if (activityCache.size > 1_000) activityCache.clear(); // blunt bound; entries are tiny
+    activityCache.set(path, { mtimeMs: statInfo.mtimeMs, size: statInfo.size, events });
+  }
+  return events;
+}
+
+async function parseActivity(path) {
   const raw = await tailText(path);
   if (!raw) return [];
   const events = [];
@@ -114,9 +128,10 @@ export async function buildSnapshot() {
   for (const item of map.values()) {
     const source = item.pending || item.registry || item.done || {};
     const transcriptPath = source.transcriptPath || item.registry?.transcriptPath || item.done?.transcriptPath || await findTranscript(item.session);
-    const activity = await readActivity(transcriptPath);
-    let transcriptAt = 0;
-    try { transcriptAt = (await stat(transcriptPath)).mtimeMs; } catch { /* no transcript */ }
+    let statInfo;
+    try { statInfo = transcriptPath ? await stat(transcriptPath) : undefined; } catch { /* no transcript */ }
+    const activity = await readActivity(transcriptPath, statInfo);
+    const transcriptAt = statInfo?.mtimeMs || 0;
     const updatedAt = Math.max(transcriptAt,
       item.registry?.updatedAt || 0, item.pending?.nextTry || 0, item.pending?.receivedAt || 0,
       item.done?.finishedAt || 0, item.ralph?.updatedAt || 0,
@@ -152,8 +167,7 @@ export async function buildSnapshot() {
     }
   }
 
-  const priority = { running: 0, active: 1, waiting: 2, orphaned: 3, stale: 4, ended: 5, opened: 6, resumed: 7, failed: 8, done: 9 };
-  sessions.sort((a, b) => (priority[a.status] ?? 9) - (priority[b.status] ?? 9) || b.updatedAt - a.updatedAt);
+  sessions.sort((a, b) => statusPriority(a.status) - statusPriority(b.status) || b.updatedAt - a.updatedAt);
   return {
     generatedAt: Date.now(),
     summary: {
@@ -177,12 +191,19 @@ function openBrowser(url) {
   } catch { /* opening is best-effort */ }
 }
 
+// Host-header allowlist blocks DNS-rebinding (a hostile page pointing a browser's fetch at a
+// domain that resolves to 127.0.0.1); the per-launch token blocks other local accounts on a
+// shared machine from reading session/transcript activity just by guessing the fixed port.
+function isLoopbackHost(host = '') {
+  return /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host);
+}
+
 export function canOpenSession(item) {
   return item && !['active', 'running', 'waiting', 'orphaned'].includes(item.status);
 }
 
 async function openSessionTerminal(item) {
-  const config = await loadConfig();
+  const config = await loadConfig(item.cwd);
   await openTerminal([...config.claudeCmd, '--resume', item.session], item.cwd || homedir());
 }
 
@@ -196,17 +217,30 @@ async function readBody(request, limit = 4_096) {
   }
   return JSON.parse(Buffer.concat(parts).toString('utf8'));
 }
+
 export async function startDashboard({ port = 4178, open = true } = {}) {
+  const token = randomBytes(16).toString('hex');
   let dashboardOrigin;
   const server = createServer(async (request, response) => {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
-    if (request.url === '/') {
+    if (!isLoopbackHost(request.headers.host)) {
+      response.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      response.end('Forbidden');
+      return;
+    }
+    const url = new URL(request.url, `http://${request.headers.host}`);
+    if (url.searchParams.get('token') !== token) {
+      response.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      response.end('Forbidden: missing or invalid token');
+      return;
+    }
+    if (url.pathname === '/') {
       response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       response.end(dashboardPage);
       return;
     }
-    if (request.url === '/api') {
+    if (url.pathname === '/api') {
       try {
         response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         response.end(JSON.stringify(await buildSnapshot()));
@@ -216,7 +250,7 @@ export async function startDashboard({ port = 4178, open = true } = {}) {
       }
       return;
     }
-    if (request.url === '/api/open' && request.method === 'POST') {
+    if (url.pathname === '/api/open' && request.method === 'POST') {
       response.setHeader('Content-Type', 'application/json; charset=utf-8');
       try {
         if (request.headers.origin !== dashboardOrigin || request.headers['x-taskwake-action'] !== 'open-session') {
@@ -258,8 +292,11 @@ export async function startDashboard({ port = 4178, open = true } = {}) {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', resolve);
   });
-  const url = `http://127.0.0.1:${server.address().port}`;
-  dashboardOrigin = url;
+  dashboardOrigin = `http://127.0.0.1:${server.address().port}`;
+  const url = `${dashboardOrigin}/?token=${token}`;
+  // Expose the tokenized URL so tests (and embedders) can reach the authed endpoints
+  // without scraping stdout; the raw origin alone is intentionally not enough.
+  server.taskwakeUrl = url;
   process.stdout.write(t(`TaskWake dashboard: ${url}\n`, `TaskWake 控制台：${url}\n`));
   if (open) openBrowser(url);
   return server;

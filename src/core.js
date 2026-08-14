@@ -9,15 +9,128 @@ export const defaults = Object.freeze({
   usageResumeSpacingMs: 5 * 60_000,
   retryText: 'Continue from the interruption.',
   resumeMode: 'hybrid',
+  workspacePolicy: 'hold',
   maxAttempts: 4,
   overloadMs: [30_000, 60_000, 120_000, 240_000, 300_000],
   maxContextResume: 2_000_000,
+  maxContextResumeTokens: 200_000,
+  weeklyResumeCeiling: 50,
   weeklyPolicy: 'notify',
   notify: 'toast',
   claudeCmd: ['claude'],
   ralph: false,
   ralphMaxTurns: 20,
+  ralphTaskFiles: ['TODO.md', 'REVIEW_AND_HANDOFF.md', 'GAME_DESIGN.md'],
 });
+
+// Single source of truth for every session/outcome status: display order (lower = more
+// urgent in the dashboard) and en/zh labels. The CLI, the dashboard API, and the embedded
+// dashboard page all derive from this table — adding a status is a one-place change.
+export const STATUSES = Object.freeze({
+  running: { priority: 0, en: 'Resuming', zh: '自动续跑中' },
+  active: { priority: 1, en: 'Active', zh: '活动中' },
+  waiting: { priority: 2, en: 'Waiting to retry', zh: '等待重试' },
+  orphaned: { priority: 3, en: 'Awaiting recovery', zh: '等待恢复' },
+  stale: { priority: 4, en: 'Process missing', zh: '进程已失联' },
+  ended: { priority: 5, en: 'Ended', zh: '已结束' },
+  opened: { priority: 6, en: 'Opened in terminal', zh: '已在终端打开' },
+  resumed: { priority: 7, en: 'Resumed', zh: '已续跑' },
+  'resumed-idle': { priority: 7, en: 'Resumed (possibly idle)', zh: '已续跑（可能未实际工作）' },
+  bricked: { priority: 8, en: 'Session corrupted', zh: '会话已损坏' },
+  failed: { priority: 8, en: 'Resume failed', zh: '续跑失败' },
+  'gave-up': { priority: 8, en: 'Retry stopped', zh: '已停止重试' },
+  'skipped-weekly': { priority: 8, en: 'Weekly limit', zh: '每周限额' },
+  'skipped-context': { priority: 8, en: 'Manual reopen needed', zh: '需手动重开' },
+  'skipped-weekly-budget': { priority: 8, en: 'Weekly budget ceiling reached', zh: '已达每周续跑上限' },
+  'skipped-workspace-changed': { priority: 8, en: 'Workspace changed; not auto-resumed', zh: '工作区已变更，未自动续跑' },
+  done: { priority: 9, en: 'Completed', zh: '已完成' },
+});
+
+export const statusLabel = (status, chinese = false) => STATUSES[status]?.[chinese ? 'zh' : 'en'] || status;
+export const statusPriority = (status) => STATUSES[status]?.priority ?? 9;
+export const statusLabels = (lang) => Object.fromEntries(Object.entries(STATUSES).map(([status, entry]) => [status, entry[lang]]));
+
+// Rough, conservative token estimate from a byte count (~4 bytes/token for English text).
+// JSON structural overhead in a transcript pushes the true ratio higher (fewer tokens per
+// byte), so this over-estimates tokens if anything — safe direction for a skip-resume gate.
+export function estimateTokens(bytes = 0) {
+  return Math.ceil(Math.max(0, bytes) / 4);
+}
+
+const idleWords = [
+  /\bi (?:don't|do not|can't|cannot) (?:have|get) (?:permission|access)\b/i,
+  /\bnot allowed to\b/i,
+  /\brequires? (?:approval|permission)\b/i,
+  /\bpermission denied\b/i,
+  /\bplease (?:grant|enable) (?:permission|access)\b/i,
+  /\bwaiting for (?:your |user )?(?:approval|permission)\b/i,
+];
+
+// Heuristic only: flags a "successful" (exit 0) resume whose final text reads like the
+// model was blocked by tool permissions rather than doing real work. False negatives are
+// expected (many valid replies never mention permissions); it exists to annotate, not gate.
+export function looksIdle(text = '') {
+  return idleWords.some((pattern) => pattern.test(text));
+}
+
+const brickedWords = [/\bprevious_message_id\b/i];
+
+// Matches the upstream "resume permanently corrupts the session" failure signature
+// (anthropics/claude-code #76008 / #68553): retrying it burns attempts on something that
+// cannot succeed, so the waiter should recognize it and stop instead of exhausting maxAttempts.
+export function looksBricked(text = '') {
+  return brickedWords.some((pattern) => pattern.test(text));
+}
+
+// Parses `claude ... --output-format json` stdout structurally so the waiter can classify a
+// completed turn without regex-scanning the model's own (possibly rate-limit-discussing)
+// reply text. Returns null when stdout isn't a single JSON result object, so callers can fall
+// back to the legacy full-text scan for older CLI versions or hard failures that never print JSON.
+export function parseCliJsonResult(stdout = '') {
+  const trimmed = stdout.trim();
+  if (!trimmed.startsWith('{')) return null;
+  let value;
+  try { value = JSON.parse(trimmed); } catch { return null; }
+  if (!value || typeof value !== 'object') return null;
+  const isError = value.is_error === true || (typeof value.subtype === 'string' && value.subtype.startsWith('error'));
+  return {
+    isError,
+    resultText: typeof value.result === 'string' ? value.result : '',
+    numTurns: Number.isFinite(value.num_turns) ? value.num_turns : undefined,
+    totalCostUsd: Number.isFinite(value.total_cost_usd) ? value.total_cost_usd : undefined,
+  };
+}
+
+// Single source of truth for judging a finished resume probe (shared by the waiter and the
+// benchmark harness). A well-formed non-error JSON result with exit 0 is a success outright —
+// the reply text is NEVER banner-scanned then, because a successful turn may legitimately say
+// "try again in 5 seconds" while describing its own work. Banner regexes only apply to
+// failures and to raw (non-JSON) output from older CLIs.
+export function classifyProbe({ code, stdout = '', stderr = '' }) {
+  const parsed = parseCliJsonResult(stdout);
+  if (parsed && code === 0 && !parsed.isError) return { verdict: 'resumed', kind: undefined, parsed };
+  const scanText = parsed ? `${parsed.resultText}\n${stderr}` : `${stdout}\n${stderr}`;
+  const kind = failureKind(scanText);
+  if (code === 0 && !kind && !parsed?.isError) return { verdict: 'resumed', kind: undefined, parsed };
+  return { verdict: kind === 'usage' ? 'still-limited' : kind === 'overload' ? 'overload' : 'other-failure', kind, parsed };
+}
+
+// Incremental scanner for a live `codex exec --json` stream. Chunk boundaries can split a
+// JSONL line (e.g. thread.started arriving as two data events), so the thread id must be
+// re-scanned from the accumulated tail, never from a single chunk.
+export function codexStreamScanner(limit = 65_536) {
+  let tail = '';
+  let thread = null;
+  return {
+    push(part) {
+      tail = (tail + part).slice(-limit);
+      thread ||= readCodexJson(tail).thread;
+      return thread;
+    },
+    get tail() { return tail; },
+    get thread() { return thread; },
+  };
+}
 
 const usageWords = [
   /\b\d+-hour limit\b/i,

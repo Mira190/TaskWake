@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { defaults } from './core.js';
@@ -20,34 +21,62 @@ const legacyConfig = join(userHome, '.rewake.json');
 const configFile = process.env.TASKWAKE_CONFIG || process.env.REWAKE_CONFIG
   || (existsSync(legacyConfig) && !existsSync(modernConfig) ? legacyConfig : modernConfig);
 
-export async function loadConfig() {
-  const config = { ...defaults };
+function applyOverrides(config, raw) {
+  for (const key of ['marginMs', 'fallbackMs', 'maxAttempts', 'maxContextResume', 'maxContextResumeTokens', 'weeklyResumeCeiling']) {
+    if (Number.isFinite(raw[key]) && raw[key] >= 0) config[key] = raw[key];
+  }
+  for (const key of ['usagePollMs', 'usageResumeSpacingMs']) {
+    if (Number.isFinite(raw[key]) && raw[key] > 0) config[key] = raw[key];
+  }
+  if (typeof raw.retryText === 'string' && raw.retryText.trim()) config.retryText = raw.retryText;
+  if (['hybrid', 'headless'].includes(raw.resumeMode)) config.resumeMode = raw.resumeMode;
+  if (['hold', 'ignore'].includes(raw.workspacePolicy)) config.workspacePolicy = raw.workspacePolicy;
+  if (Array.isArray(raw.overloadMs) && raw.overloadMs.length && raw.overloadMs.every((item) => Number.isFinite(item) && item > 0)) {
+    config.overloadMs = raw.overloadMs;
+  }
+  if (Array.isArray(raw.claudeCmd) && raw.claudeCmd.length && raw.claudeCmd.every((item) => typeof item === 'string')) {
+    config.claudeCmd = raw.claudeCmd;
+  }
+  if (Array.isArray(raw.ralphTaskFiles) && raw.ralphTaskFiles.length && raw.ralphTaskFiles.every((item) => typeof item === 'string' && item.trim())) {
+    config.ralphTaskFiles = raw.ralphTaskFiles;
+  }
+  if (typeof raw.ralph === 'boolean') config.ralph = raw.ralph;
+  if (Number.isInteger(raw.ralphMaxTurns) && raw.ralphMaxTurns > 0) config.ralphMaxTurns = raw.ralphMaxTurns;
+  if (['notify', 'resume'].includes(raw.weeklyPolicy)) config.weeklyPolicy = raw.weeklyPolicy;
+  if (['toast', 'none'].includes(raw.notify)) config.notify = raw.notify;
+  return config;
+}
+
+// Global ~/.taskwake.json first, then an optional project-local .taskwake.json (in `cwd`)
+// layered on top — lets one project opt in/out of e.g. ralph without changing the machine-wide
+// default. `cwd` is optional so existing single-argument call sites are unaffected.
+export async function loadConfig(cwd) {
+  let config = { ...defaults };
   try {
-    const raw = JSON.parse(await readFile(configFile, 'utf8'));
-    for (const key of ['marginMs', 'fallbackMs', 'maxAttempts', 'maxContextResume']) {
-      if (Number.isFinite(raw[key]) && raw[key] >= 0) config[key] = raw[key];
-    }
-    for (const key of ['usagePollMs', 'usageResumeSpacingMs']) {
-      if (Number.isFinite(raw[key]) && raw[key] > 0) config[key] = raw[key];
-    }
-    if (typeof raw.retryText === 'string' && raw.retryText.trim()) config.retryText = raw.retryText;
-    if (['hybrid', 'headless'].includes(raw.resumeMode)) config.resumeMode = raw.resumeMode;
-    if (Array.isArray(raw.overloadMs) && raw.overloadMs.length && raw.overloadMs.every((item) => Number.isFinite(item) && item > 0)) {
-      config.overloadMs = raw.overloadMs;
-    }
-    if (Array.isArray(raw.claudeCmd) && raw.claudeCmd.length && raw.claudeCmd.every((item) => typeof item === 'string')) {
-      config.claudeCmd = raw.claudeCmd;
-    }
-    if (typeof raw.ralph === 'boolean') config.ralph = raw.ralph;
-    if (Number.isInteger(raw.ralphMaxTurns) && raw.ralphMaxTurns > 0) config.ralphMaxTurns = raw.ralphMaxTurns;
-    if (['notify', 'resume'].includes(raw.weeklyPolicy)) config.weeklyPolicy = raw.weeklyPolicy;
-    if (['toast', 'none'].includes(raw.notify)) config.notify = raw.notify;
-  } catch { /* no config file */ }
+    config = applyOverrides(config, JSON.parse(await readFile(configFile, 'utf8')));
+  } catch { /* no global config file */ }
+  if (cwd) {
+    try {
+      config = applyOverrides(config, JSON.parse(await readFile(join(cwd, '.taskwake.json'), 'utf8')));
+    } catch { /* no project config file */ }
+  }
   return config;
 }
 
 export async function readJson(path) {
   try { return JSON.parse(await readFile(path, 'utf8')); } catch { return undefined; }
+}
+
+export async function listJson(dir) {
+  try {
+    const names = (await readdir(dir)).filter((name) => name.endsWith('.json'));
+    return (await Promise.all(names.map((name) => readJson(join(dir, name))))).filter(Boolean);
+  } catch { return []; }
+}
+
+export function aliveProcess(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 export async function writeAtomic(path, value) {
@@ -92,6 +121,19 @@ export function runCommand(argv, options = {}) {
       stderr: Buffer.concat(stderr).toString(),
     }));
   });
+}
+
+// Compact identity of a working tree: HEAD commit + a hash of the porcelain status.
+// undefined when cwd is missing, not a git repo, or git is unavailable — callers treat
+// undefined as "cannot fingerprint" and skip the comparison entirely.
+export async function workspaceFingerprint(cwd, run = runCommand) {
+  if (!cwd) return undefined;
+  const head = await run(['git', 'rev-parse', 'HEAD'], { cwd });
+  if (head.code !== 0) return undefined;
+  const status = await run(['git', 'status', '--porcelain'], { cwd });
+  if (status.code !== 0) return undefined;
+  const dirty = createHash('sha1').update(status.stdout).digest('hex').slice(0, 12);
+  return `${head.stdout.trim()}:${dirty}`;
 }
 
 export async function canShowTerminal(env = process.env, platform = process.platform, probe = runCommand) {

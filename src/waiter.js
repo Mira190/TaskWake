@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 // One short-lived process per interrupted session: wait, probe, and verify.
 // Usage sessions share one durable gate so several Claudes never probe the same account together.
-import { mkdir, open, stat, unlink } from 'node:fs/promises';
+import { mkdir, open, readdir, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { cleanId, failureKind, isWeekly, resetEpoch } from './core.js';
+import {
+  classifyProbe, cleanId, estimateTokens, isWeekly, looksBricked, looksIdle, resetEpoch,
+} from './core.js';
 import { t } from './i18n.js';
-import { canShowTerminal, doneDir, home, loadConfig, log, notify, openTerminal, pendingDir, readJson, runCommand, writeAtomic } from './store.js';
+import { canShowTerminal, doneDir, home, loadConfig, log, notify, openTerminal, pendingDir, readJson, runCommand, workspaceFingerprint, writeAtomic } from './store.js';
 
 const CHUNK = 60_000; // local cancellation/clock check; this never calls Claude
 const GATE_STALE_MS = 2 * 60_000;
+const WEEK_MS = 7 * 24 * 60 * 60 * 1_000;
 const gateFile = join(home, 'usage-gate.json');
 const gateLock = `${gateFile}.lock`;
 const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -58,16 +61,35 @@ async function setUsageGate(session, nextProbeAt, result) {
   }));
 }
 
-function initialDeadline(state, config) {
+export function initialDeadline(state, config) {
   const now = state.receivedAt || Date.now();
   const parsed = resetEpoch(state.details, now, Number.NaN);
-  const trusted = Number.isFinite(parsed);
-  const hint = trusted ? parsed : (state.resetHint || now + config.fallbackMs);
+  // The hook may have computed resetHint from machine-readable data (error_details.
+  // retry_after_seconds) that the banner-text re-parse can't see. resetParsed marks that
+  // hint as trustworthy; without honouring it, an early probe at the hinted time would be
+  // treated as untrusted and burn an attempt even when the hint was exact.
+  const trusted = Number.isFinite(parsed) || Boolean(state.resetParsed && state.resetHint);
+  const hint = Number.isFinite(parsed) ? parsed : (state.resetHint || now + config.fallbackMs);
   return { deadline: hint + config.marginMs, trusted };
 }
 
 function nextUsageCheck(deadline, config, now = Date.now()) {
   return Math.max(now, Math.min(deadline, now + jitter(config.usagePollMs, 0.08)));
+}
+
+// Counts recent successful auto-resumes across ALL sessions so a night of repeated 5-hour
+// resets can't silently burn most of the weekly cap before a human notices. 'opened' counts
+// too: the visible-terminal path auto-submits retryText, so it also spends quota unattended.
+export async function recentResumeCount(windowMs = WEEK_MS, now = Date.now()) {
+  let names = [];
+  try { names = (await readdir(doneDir)).filter((name) => name.endsWith('.json')); }
+  catch { return 0; }
+  let count = 0;
+  for (const name of names) {
+    const record = await readJson(join(doneDir, name));
+    if (record && ['resumed', 'resumed-idle', 'opened'].includes(record.status) && now - (record.finishedAt || 0) < windowMs) count++;
+  }
+  return count;
 }
 
 export async function shouldOpenTerminal(kind, mode, deadline, now = Date.now(), env = process.env, platform = process.platform, probe) {
@@ -94,7 +116,17 @@ export async function wait(session, config) {
     notify('TaskWake', t(`Weekly limit hit; not auto-resuming. Reopen later: claude --resume ${session}`, `已达到每周限额，未自动续跑。稍后重新打开：claude --resume ${session}`), config);
     return finish('skipped-weekly');
   }
-  const oversized = state.transcriptBytes > config.maxContextResume;
+  if (state.kind === 'usage' && config.weeklyResumeCeiling > 0 && (await recentResumeCount(WEEK_MS)) >= config.weeklyResumeCeiling) {
+    notify('TaskWake', t(
+      `Reached the configured weekly auto-resume ceiling (${config.weeklyResumeCeiling}); not auto-resuming to protect the rest of your weekly quota. Reopen: claude --resume ${session}`,
+      `已达到配置的每周自动续跑上限（${config.weeklyResumeCeiling}）；为保留剩余每周额度未自动续跑。重新打开：claude --resume ${session}`,
+    ), config);
+    return finish('skipped-weekly-budget');
+  }
+  // Oversized (by bytes or by estimated tokens) doesn't skip outright anymore: the visible
+  // terminal path can still take it at the deadline; only the costly headless path is barred.
+  const oversized = state.transcriptBytes > config.maxContextResume
+    || estimateTokens(state.transcriptBytes) > config.maxContextResumeTokens;
 
   let { deadline, trusted } = initialDeadline(state, config);
   let until = state.kind === 'usage'
@@ -127,6 +159,23 @@ export async function wait(session, config) {
       }
     }
 
+    // Stale-world guard: if the repo's HEAD or dirty state moved while we waited (user
+    // commits, a pull, another agent), continuing blindly may act on assumptions that no
+    // longer hold. Default is to hand back to the human; `workspacePolicy: "ignore"` opts out.
+    // Both fingerprints must exist for a verdict — an unfingerprintable workspace never holds.
+    let preProbeWorkspace;
+    if (state.workspace && config.workspacePolicy !== 'ignore') {
+      const currentWorkspace = preProbeWorkspace = await workspaceFingerprint(state.cwd);
+      if (currentWorkspace && currentWorkspace !== state.workspace) {
+        if (wasUsage) await setUsageGate(session, Date.now() + Math.min(CHUNK, config.usagePollMs), 'workspace-changed');
+        notify('TaskWake', t(
+          `Workspace changed while waiting (new commits or edits); not auto-resuming. Review and reopen: claude --resume ${session}`,
+          `等待期间工作区已变更（新的提交或修改），未自动续跑。请检查后重新打开：claude --resume ${session}`,
+        ), config);
+        return finish('skipped-workspace-changed');
+      }
+    }
+
     if (await shouldOpenTerminal(state.kind, config.resumeMode, deadline)) {
       try {
         const terminalPid = await openTerminal([...config.claudeCmd, '--resume', session, config.retryText], state.cwd);
@@ -138,10 +187,20 @@ export async function wait(session, config) {
       }
     }
     if (oversized) {
+      // The gate was just claimed for this probe slot; hand it back quickly instead of
+      // leaving it reserved for the full usagePollMs, which would starve other sessions.
+      // Bounded by the configured cadence so a short usagePollMs is honoured.
+      if (wasUsage) await setUsageGate(session, Date.now() + Math.min(CHUNK, config.usagePollMs), 'skipped-context');
       notify('TaskWake', t(`Transcript too large for efficient headless resume. Reopen: claude --resume ${session}`, `会话记录过大，不适合无头续跑。重新打开：claude --resume ${session}`), config);
       return finish('skipped-context');
     }
 
+    // Must be captured BEFORE the probe runs (the hold check may have skipped it under
+    // workspacePolicy: "ignore"); comparing a post-probe value to itself would always
+    // report "no file changes".
+    if (state.workspace && preProbeWorkspace === undefined) {
+      preProbeWorkspace = await workspaceFingerprint(state.cwd);
+    }
     state.probes++;
     await log(`probe session=${session} probe=${state.probes} failures=${state.attempts}`);
     const result = await runCommand(
@@ -155,11 +214,48 @@ export async function wait(session, config) {
       },
     );
     const combined = `${result.stdout}\n${result.stderr}`;
-    const kind = failureKind(combined);
-    if (result.code === 0 && !kind) {
+    if (looksBricked(combined)) {
+      // Matches anthropics/claude-code #76008 / #68553: a resume that leaves the session
+      // permanently corrupted. Retrying can't fix it, so stop instead of burning maxAttempts.
+      if (wasUsage) await setUsageGate(session, Date.now() + config.usageResumeSpacingMs, 'bricked');
+      notify('TaskWake', t(
+        `Resume left the session corrupted (previous_message_id error) and can't be safely retried. Reopen manually: claude --resume ${session}`,
+        `续跑后会话已损坏（previous_message_id 错误），无法安全重试。请手动重新打开：claude --resume ${session}`,
+      ), config);
+      return finish('bricked', { attempts: state.probes });
+    }
+
+    // classifyProbe (core.js) is the single source of truth: a well-formed non-error JSON
+    // result with exit 0 is success outright — its reply text is never banner-scanned, so a
+    // continuation that legitimately says "try again in 5 seconds" can't be misread as
+    // still-limited. Raw-text scanning remains only for non-JSON output and failures.
+    const { verdict, kind, parsed: parsedResult } = classifyProbe(result);
+    if (verdict === 'resumed') {
       if (wasUsage) await setUsageGate(session, Date.now() + config.usageResumeSpacingMs, 'resumed');
-      notify('TaskWake', t(`Session resumed. Reopen: claude --resume ${session}`, `会话已续跑。重新打开：claude --resume ${session}`), config);
-      return finish('resumed', { attempts: state.probes });
+      const idle = looksIdle(parsedResult?.resultText || '');
+      // Hard evidence of work: fingerprint the workspace around the probe. Only meaningful
+      // when the session was fingerprintable at interruption; complements the looksIdle
+      // text heuristic with an observation the model can't phrase its way around.
+      const afterProbe = preProbeWorkspace ? await workspaceFingerprint(state.cwd) : undefined;
+      const workspaceChanged = preProbeWorkspace && afterProbe ? afterProbe !== preProbeWorkspace : undefined;
+      // Say what the continuation actually did, not just that it ran: turns and cost come
+      // from the CLI's own result JSON, so the user can judge whether the resume was worth it.
+      const facts = [
+        parsedResult?.numTurns !== undefined ? t(`${parsedResult.numTurns} turns`, `${parsedResult.numTurns} 轮`) : '',
+        parsedResult?.totalCostUsd !== undefined ? `$${parsedResult.totalCostUsd.toFixed(2)}` : '',
+        workspaceChanged === true ? t('files changed', '已修改文件')
+          : workspaceChanged === false ? t('no file changes', '未修改文件') : '',
+      ].filter(Boolean).join(', ');
+      const summary = facts ? ` (${facts})` : '';
+      notify('TaskWake', idle
+        ? t(`Session resumed${summary}, but the reply reads like it was blocked by permission prompts (may not have done real work). Check the claudeCmd permission mode. Reopen: claude --resume ${session}`, `会话已续跑${summary}，但回复内容像是被权限提示阻塞（可能未实际完成工作）。请检查 claudeCmd 的权限模式。重新打开：claude --resume ${session}`)
+        : t(`Session resumed${summary}. Reopen: claude --resume ${session}`, `会话已续跑${summary}。重新打开：claude --resume ${session}`), config);
+      return finish(idle ? 'resumed-idle' : 'resumed', {
+        attempts: state.probes,
+        ...(parsedResult?.numTurns !== undefined ? { numTurns: parsedResult.numTurns } : {}),
+        ...(parsedResult?.totalCostUsd !== undefined ? { costUsd: parsedResult.totalCostUsd } : {}),
+        ...(workspaceChanged !== undefined ? { workspaceChanged } : {}),
+      });
     }
 
     const now = Date.now();
@@ -189,5 +285,10 @@ export async function wait(session, config) {
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  await wait(process.argv[2], await loadConfig());
+  const session = process.argv[2];
+  // Peek the pending record's cwd so a project-local .taskwake.json can override settings
+  // like weeklyResumeCeiling for a real run, without changing wait()'s signature (tests call
+  // wait() directly with an explicit config object and must not have it silently reloaded).
+  const peeked = await readJson(join(pendingDir, `${cleanId(session)}.json`));
+  await wait(session, await loadConfig(peeked?.cwd));
 }

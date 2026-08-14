@@ -1,31 +1,21 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
-import { readdir, unlink } from 'node:fs/promises';
+import { unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { cleanId } from '../src/core.js';
+import { cleanId, statusLabel } from '../src/core.js';
 import { startDashboard } from '../src/dashboard.js';
 import { runCodex } from '../src/codex.js';
-import { locale, t } from '../src/i18n.js';
-import { doneDir, loadConfig, pendingDir, readJson, tailLog } from '../src/store.js';
+import { chinese, locale, t } from '../src/i18n.js';
+import { doneDir, listJson, loadConfig, pendingDir, tailLog } from '../src/store.js';
 
-async function list(dir) {
-  try {
-    const names = (await readdir(dir)).filter((name) => name.endsWith('.json'));
-    return (await Promise.all(names.map((name) => readJson(join(dir, name))))).filter(Boolean);
-  } catch { return []; }
-}
-
-const statusName = (status) => ({
-  resumed: t('resumed', '已续跑'), 'skipped-weekly': t('weekly limit skipped', '已跳过每周限额'),
-  'skipped-context': t('large context skipped', '已跳过超大上下文'), 'gave-up': t('gave up', '已停止重试'),
-}[status] || status);
+const statusName = (status) => statusLabel(status, chinese);
 
 async function status() {
   const config = await loadConfig();
-  const pending = await list(pendingDir);
-  const done = (await list(doneDir)).sort((a, b) => b.finishedAt - a.finishedAt).slice(0, 10);
+  const pending = await listJson(pendingDir);
+  const done = (await listJson(doneDir)).sort((a, b) => b.finishedAt - a.finishedAt).slice(0, 10);
   for (const item of pending) {
     const at = new Date(item.nextTry || (item.resetHint && item.resetHint + config.marginMs) || item.receivedAt).toLocaleString(locale);
     process.stdout.write(t(
@@ -35,9 +25,13 @@ async function status() {
   }
   for (const item of done) {
     const at = new Date(item.finishedAt).toLocaleString(locale);
+    const cost = [
+      item.numTurns !== undefined ? t(`turns=${item.numTurns}`, `轮次=${item.numTurns}`) : '',
+      item.costUsd !== undefined ? `$${item.costUsd.toFixed(2)}` : '',
+    ].filter(Boolean).join('  ');
     process.stdout.write(t(
-      `${statusName(item.status)}  ${item.session}  ${item.errorType}  finished=${at}\n`,
-      `${statusName(item.status)}  ${item.session}  ${item.errorType}  完成=${at}\n`,
+      `${statusName(item.status)}  ${item.session}  ${item.errorType}  finished=${at}${cost ? '  ' + cost : ''}\n`,
+      `${statusName(item.status)}  ${item.session}  ${item.errorType}  完成=${at}${cost ? '  ' + cost : ''}\n`,
     ));
   }
   if (!pending.length && !done.length) process.stdout.write(t('No TaskWake activity recorded.\n', '暂无 TaskWake 活动记录。\n'));

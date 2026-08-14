@@ -2,8 +2,9 @@ import { strict as assert } from 'node:assert';
 import { readFile } from 'node:fs/promises';
 import { describe, it } from 'node:test';
 import {
-  codexExecIndex, codexResumeArgs, failureKind, isWeekly,
-  jsonCodexArgs, readCodexJson, resetEpoch,
+  classifyProbe, codexExecIndex, codexResumeArgs, codexStreamScanner, estimateTokens,
+  failureKind, isWeekly, jsonCodexArgs, looksBricked, looksIdle, parseCliJsonResult,
+  readCodexJson, resetEpoch, STATUSES, statusLabel, statusPriority,
 } from '../src/core.js';
 import { dashboardPage } from '../src/dashboard-page.js';
 import { isChineseLocale } from '../src/i18n.js';
@@ -41,6 +42,26 @@ describe('dashboard localization', () => {
     assert.match(dashboardPage, /navigator\.language/);
     assert.match(dashboardPage, /TaskWake Control Room/);
     assert.match(dashboardPage, /TaskWake 控制中心/);
+  });
+
+  it('embeds the status labels generated from the shared STATUSES table', () => {
+    assert.match(dashboardPage, /Opened in terminal/, 'en labels interpolated');
+    assert.match(dashboardPage, /已在终端打开/, 'zh labels interpolated');
+    assert.match(dashboardPage, /skipped-workspace-changed/, 'new statuses flow through without page edits');
+  });
+});
+
+describe('status table', () => {
+  it('labels and priorities come from one table, with safe fallbacks', () => {
+    assert.equal(statusLabel('resumed'), 'Resumed');
+    assert.equal(statusLabel('resumed', true), '已续跑');
+    assert.equal(statusLabel('some-unknown-status'), 'some-unknown-status');
+    assert.ok(statusPriority('running') < statusPriority('waiting'));
+    assert.ok(statusPriority('waiting') < statusPriority('done'));
+    assert.equal(statusPriority('some-unknown-status'), 9);
+    for (const [status, entry] of Object.entries(STATUSES)) {
+      assert.ok(entry.en && entry.zh && Number.isInteger(entry.priority), `complete entry for ${status}`);
+    }
   });
 });
 describe('failure classification', () => {
@@ -99,6 +120,90 @@ describe('reset scheduling', () => {
 
   it('falls back when nothing parses', () => {
     assert.equal(resetEpoch('some random text', 1_000, 500), 1_500);
+  });
+});
+
+describe('token estimate', () => {
+  it('estimates conservatively from byte count (rounds up, floors at zero)', () => {
+    assert.equal(estimateTokens(0), 0);
+    assert.equal(estimateTokens(4), 1);
+    assert.equal(estimateTokens(5), 2);
+    assert.equal(estimateTokens(-10), 0);
+  });
+});
+
+describe('idle and bricked detection', () => {
+  it('flags permission-blocked replies as idle but leaves normal work alone', () => {
+    assert.equal(looksIdle("I don't have permission to run that command."), true);
+    assert.equal(looksIdle('Please grant access to continue.'), true);
+    assert.equal(looksIdle('Fixed the bug and ran the tests, all green.'), false);
+  });
+
+  it('flags the previous_message_id corruption signature as bricked', () => {
+    assert.equal(looksBricked('400: diagnostics.previous_message_id not found'), true);
+    assert.equal(looksBricked('normal assistant output'), false);
+  });
+});
+
+describe('structured CLI result parsing', () => {
+  it('parses a successful --output-format json result', () => {
+    const stdout = JSON.stringify({ type: 'result', is_error: false, result: 'Fixed it.', num_turns: 3, total_cost_usd: 0.12 });
+    const parsed = parseCliJsonResult(stdout);
+    assert.equal(parsed.isError, false);
+    assert.equal(parsed.resultText, 'Fixed it.');
+    assert.equal(parsed.numTurns, 3);
+    assert.equal(parsed.totalCostUsd, 0.12);
+  });
+
+  it('recognizes an error via is_error or an error-prefixed subtype', () => {
+    assert.equal(parseCliJsonResult(JSON.stringify({ type: 'result', is_error: true, result: 'API Error: 429' })).isError, true);
+    assert.equal(parseCliJsonResult(JSON.stringify({ type: 'result', subtype: 'error_during_execution', result: 'boom' })).isError, true);
+  });
+
+  it('returns null for non-JSON stdout so callers fall back to raw-text scanning', () => {
+    assert.equal(parseCliJsonResult('plain text output'), null);
+    assert.equal(parseCliJsonResult('{not valid json'), null);
+    assert.equal(parseCliJsonResult('null'), null);
+  });
+});
+
+describe('probe classification (classifyProbe)', () => {
+  it('trusts a non-error JSON result with exit 0 without banner-scanning the reply text', () => {
+    const { verdict } = classifyProbe({
+      code: 0,
+      stdout: JSON.stringify({ type: 'result', is_error: false, result: 'Done. Will try again in 5 seconds when the queue is full.' }),
+      stderr: '',
+    });
+    assert.equal(verdict, 'resumed', 'reply text discussing retries must not be misread as a limit');
+  });
+
+  it('classifies limit banners inside an error result and in raw output', () => {
+    assert.equal(classifyProbe({
+      code: 1,
+      stdout: JSON.stringify({ type: 'result', is_error: true, result: "You've hit your session limit · resets 4pm" }),
+    }).verdict, 'still-limited');
+    assert.equal(classifyProbe({ code: 1, stdout: "You've hit your session limit · resets 4pm" }).verdict, 'still-limited');
+    assert.equal(classifyProbe({ code: 1, stdout: '', stderr: 'API Error 529: service overloaded' }).verdict, 'overload');
+    assert.equal(classifyProbe({ code: 1, stdout: 'segfault' }).verdict, 'other-failure');
+  });
+});
+
+describe('codex stream scanning', () => {
+  it('finds the thread id even when the JSONL line is split across chunks', () => {
+    const line = JSON.stringify({ type: 'thread.started', thread_id: 'split-thread' }) + '\n';
+    const scanner = codexStreamScanner();
+    scanner.push(line.slice(0, 18));
+    assert.equal(scanner.thread, null, 'half a line is not yet a thread id');
+    scanner.push(line.slice(18));
+    assert.equal(scanner.thread, 'split-thread');
+  });
+
+  it('keeps only the bounded tail while preserving an already-captured thread', () => {
+    const scanner = codexStreamScanner(64);
+    scanner.push(JSON.stringify({ type: 'thread.started', thread_id: 'early' }) + '\n');
+    scanner.push('x'.repeat(500));
+    assert.equal(scanner.thread, 'early', 'thread survives tail truncation');
+    assert.ok(scanner.tail.length <= 64);
   });
 });
 

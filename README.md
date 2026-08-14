@@ -146,6 +146,13 @@ quota. Defaults:
   transcript's byte size — a rough, deliberately conservative estimate):
   visible resume when a desktop is available; notify instead of using the
   costly headless path.
+- If the working tree's git state (HEAD or dirty files) changed while
+  waiting, the resume is held and you are notified instead
+  (`workspacePolicy: "ignore"` to disable) — an hours-later continuation
+  should not act on assumptions that no longer hold.
+- Successful resumes report what they cost: turn count and dollar figure
+  from the CLI's own result JSON appear in the notification and in
+  `taskwake status`.
 
 ## Commands
 
@@ -184,6 +191,7 @@ sessions in that directory — use it to opt one project in or out of `ralph`
 |--------------------|--------------------------------------|
 | `retryText`        | `"Continue from the interruption."`  |
 | `resumeMode`       | `"hybrid"` (`"headless"` to disable visible terminals) |
+| `workspacePolicy`  | `"hold"` (`"ignore"` to auto-resume even if the repo changed while waiting) |
 | `marginMs`         | `60000`                              |
 | `fallbackMs`       | `18000000` (5 h)                     |
 | `usagePollMs`      | `3600000` (1 h, shared across sessions) |

@@ -9,6 +9,7 @@ export const defaults = Object.freeze({
   usageResumeSpacingMs: 5 * 60_000,
   retryText: 'Continue from the interruption.',
   resumeMode: 'hybrid',
+  workspacePolicy: 'hold',
   maxAttempts: 4,
   overloadMs: [30_000, 60_000, 120_000, 240_000, 300_000],
   maxContextResume: 2_000_000,
@@ -21,6 +22,33 @@ export const defaults = Object.freeze({
   ralphMaxTurns: 20,
   ralphTaskFiles: ['TODO.md', 'REVIEW_AND_HANDOFF.md', 'GAME_DESIGN.md'],
 });
+
+// Single source of truth for every session/outcome status: display order (lower = more
+// urgent in the dashboard) and en/zh labels. The CLI, the dashboard API, and the embedded
+// dashboard page all derive from this table — adding a status is a one-place change.
+export const STATUSES = Object.freeze({
+  running: { priority: 0, en: 'Resuming', zh: '自动续跑中' },
+  active: { priority: 1, en: 'Active', zh: '活动中' },
+  waiting: { priority: 2, en: 'Waiting to retry', zh: '等待重试' },
+  orphaned: { priority: 3, en: 'Awaiting recovery', zh: '等待恢复' },
+  stale: { priority: 4, en: 'Process missing', zh: '进程已失联' },
+  ended: { priority: 5, en: 'Ended', zh: '已结束' },
+  opened: { priority: 6, en: 'Opened in terminal', zh: '已在终端打开' },
+  resumed: { priority: 7, en: 'Resumed', zh: '已续跑' },
+  'resumed-idle': { priority: 7, en: 'Resumed (possibly idle)', zh: '已续跑（可能未实际工作）' },
+  bricked: { priority: 8, en: 'Session corrupted', zh: '会话已损坏' },
+  failed: { priority: 8, en: 'Resume failed', zh: '续跑失败' },
+  'gave-up': { priority: 8, en: 'Retry stopped', zh: '已停止重试' },
+  'skipped-weekly': { priority: 8, en: 'Weekly limit', zh: '每周限额' },
+  'skipped-context': { priority: 8, en: 'Manual reopen needed', zh: '需手动重开' },
+  'skipped-weekly-budget': { priority: 8, en: 'Weekly budget ceiling reached', zh: '已达每周续跑上限' },
+  'skipped-workspace-changed': { priority: 8, en: 'Workspace changed; not auto-resumed', zh: '工作区已变更，未自动续跑' },
+  done: { priority: 9, en: 'Completed', zh: '已完成' },
+});
+
+export const statusLabel = (status, chinese = false) => STATUSES[status]?.[chinese ? 'zh' : 'en'] || status;
+export const statusPriority = (status) => STATUSES[status]?.priority ?? 9;
+export const statusLabels = (lang) => Object.fromEntries(Object.entries(STATUSES).map(([status, entry]) => [status, entry[lang]]));
 
 // Rough, conservative token estimate from a byte count (~4 bytes/token for English text).
 // JSON structural overhead in a transcript pushes the true ratio higher (fewer tokens per

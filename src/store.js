@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { appendFile, mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -29,6 +30,7 @@ function applyOverrides(config, raw) {
   }
   if (typeof raw.retryText === 'string' && raw.retryText.trim()) config.retryText = raw.retryText;
   if (['hybrid', 'headless'].includes(raw.resumeMode)) config.resumeMode = raw.resumeMode;
+  if (['hold', 'ignore'].includes(raw.workspacePolicy)) config.workspacePolicy = raw.workspacePolicy;
   if (Array.isArray(raw.overloadMs) && raw.overloadMs.length && raw.overloadMs.every((item) => Number.isFinite(item) && item > 0)) {
     config.overloadMs = raw.overloadMs;
   }
@@ -119,6 +121,19 @@ export function runCommand(argv, options = {}) {
       stderr: Buffer.concat(stderr).toString(),
     }));
   });
+}
+
+// Compact identity of a working tree: HEAD commit + a hash of the porcelain status.
+// undefined when cwd is missing, not a git repo, or git is unavailable — callers treat
+// undefined as "cannot fingerprint" and skip the comparison entirely.
+export async function workspaceFingerprint(cwd, run = runCommand) {
+  if (!cwd) return undefined;
+  const head = await run(['git', 'rev-parse', 'HEAD'], { cwd });
+  if (head.code !== 0) return undefined;
+  const status = await run(['git', 'status', '--porcelain'], { cwd });
+  if (status.code !== 0) return undefined;
+  const dirty = createHash('sha1').update(status.stdout).digest('hex').slice(0, 12);
+  return `${head.stdout.trim()}:${dirty}`;
 }
 
 export async function canShowTerminal(env = process.env, platform = process.platform, probe = runCommand) {

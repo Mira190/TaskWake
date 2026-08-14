@@ -8,7 +8,7 @@ import {
   classifyProbe, cleanId, estimateTokens, isWeekly, looksBricked, looksIdle, resetEpoch,
 } from './core.js';
 import { t } from './i18n.js';
-import { canShowTerminal, doneDir, home, loadConfig, log, notify, openTerminal, pendingDir, readJson, runCommand, writeAtomic } from './store.js';
+import { canShowTerminal, doneDir, home, loadConfig, log, notify, openTerminal, pendingDir, readJson, runCommand, workspaceFingerprint, writeAtomic } from './store.js';
 
 const CHUNK = 60_000; // local cancellation/clock check; this never calls Claude
 const GATE_STALE_MS = 2 * 60_000;
@@ -159,6 +159,22 @@ export async function wait(session, config) {
       }
     }
 
+    // Stale-world guard: if the repo's HEAD or dirty state moved while we waited (user
+    // commits, a pull, another agent), continuing blindly may act on assumptions that no
+    // longer hold. Default is to hand back to the human; `workspacePolicy: "ignore"` opts out.
+    // Both fingerprints must exist for a verdict — an unfingerprintable workspace never holds.
+    if (state.workspace && config.workspacePolicy !== 'ignore') {
+      const currentWorkspace = await workspaceFingerprint(state.cwd);
+      if (currentWorkspace && currentWorkspace !== state.workspace) {
+        if (wasUsage) await setUsageGate(session, Date.now() + Math.min(CHUNK, config.usagePollMs), 'workspace-changed');
+        notify('TaskWake', t(
+          `Workspace changed while waiting (new commits or edits); not auto-resuming. Review and reopen: claude --resume ${session}`,
+          `等待期间工作区已变更（新的提交或修改），未自动续跑。请检查后重新打开：claude --resume ${session}`,
+        ), config);
+        return finish('skipped-workspace-changed');
+      }
+    }
+
     if (await shouldOpenTerminal(state.kind, config.resumeMode, deadline)) {
       try {
         const terminalPid = await openTerminal([...config.claudeCmd, '--resume', session, config.retryText], state.cwd);
@@ -172,7 +188,8 @@ export async function wait(session, config) {
     if (oversized) {
       // The gate was just claimed for this probe slot; hand it back quickly instead of
       // leaving it reserved for the full usagePollMs, which would starve other sessions.
-      if (wasUsage) await setUsageGate(session, Date.now() + CHUNK, 'skipped-context');
+      // Bounded by the configured cadence so a short usagePollMs is honoured.
+      if (wasUsage) await setUsageGate(session, Date.now() + Math.min(CHUNK, config.usagePollMs), 'skipped-context');
       notify('TaskWake', t(`Transcript too large for efficient headless resume. Reopen: claude --resume ${session}`, `会话记录过大，不适合无头续跑。重新打开：claude --resume ${session}`), config);
       return finish('skipped-context');
     }
@@ -209,10 +226,21 @@ export async function wait(session, config) {
     if (verdict === 'resumed') {
       if (wasUsage) await setUsageGate(session, Date.now() + config.usageResumeSpacingMs, 'resumed');
       const idle = looksIdle(parsedResult?.resultText || '');
+      // Say what the continuation actually did, not just that it ran: turns and cost come
+      // from the CLI's own result JSON, so the user can judge whether the resume was worth it.
+      const facts = [
+        parsedResult?.numTurns !== undefined ? t(`${parsedResult.numTurns} turns`, `${parsedResult.numTurns} 轮`) : '',
+        parsedResult?.totalCostUsd !== undefined ? `$${parsedResult.totalCostUsd.toFixed(2)}` : '',
+      ].filter(Boolean).join(', ');
+      const summary = facts ? ` (${facts})` : '';
       notify('TaskWake', idle
-        ? t(`Session resumed, but the reply reads like it was blocked by permission prompts (may not have done real work). Check the claudeCmd permission mode. Reopen: claude --resume ${session}`, `会话已续跑，但回复内容像是被权限提示阻塞（可能未实际完成工作）。请检查 claudeCmd 的权限模式。重新打开：claude --resume ${session}`)
-        : t(`Session resumed. Reopen: claude --resume ${session}`, `会话已续跑。重新打开：claude --resume ${session}`), config);
-      return finish(idle ? 'resumed-idle' : 'resumed', { attempts: state.probes });
+        ? t(`Session resumed${summary}, but the reply reads like it was blocked by permission prompts (may not have done real work). Check the claudeCmd permission mode. Reopen: claude --resume ${session}`, `会话已续跑${summary}，但回复内容像是被权限提示阻塞（可能未实际完成工作）。请检查 claudeCmd 的权限模式。重新打开：claude --resume ${session}`)
+        : t(`Session resumed${summary}. Reopen: claude --resume ${session}`, `会话已续跑${summary}。重新打开：claude --resume ${session}`), config);
+      return finish(idle ? 'resumed-idle' : 'resumed', {
+        attempts: state.probes,
+        ...(parsedResult?.numTurns !== undefined ? { numTurns: parsedResult.numTurns } : {}),
+        ...(parsedResult?.totalCostUsd !== undefined ? { costUsd: parsedResult.totalCostUsd } : {}),
+      });
     }
 
     const now = Date.now();

@@ -2,6 +2,29 @@
 
 Newest first. Each entry: what was decided, why, and what would reverse it.
 
+## 2026-08-14 — round 2 (NEXT_STEPS #3–#6 executables)
+
+0a. **One `STATUSES` table in core.js drives every status surface** — priorities
+    (dashboard sort), en/zh labels (CLI + dashboard API + embedded page, which now
+    interpolates `statusLabels()` JSON into the template). Adding a status is a one-place
+    change; unknown statuses fall back to the raw string / priority 9.
+0b. **Workspace fingerprint hold, default ON (`workspacePolicy: "hold"`).** `saveEvent`
+    captures `git HEAD + sha1(status --porcelain)` at interruption; the waiter re-checks
+    right before any spend (after gate claim, before visible-open/probe) and finishes
+    `skipped-workspace-changed` on mismatch. Both fingerprints must exist — non-git
+    workspaces and vanished-git environments never hold. Reverse if: field data shows the
+    hold fires mostly on the user's *own* expected changes (then flip default to `ignore`).
+0c. **Gate handback times are bounded by the configured cadence**
+    (`min(CHUNK, usagePollMs)`), after the review pass's absolute `+60s` handback stalled
+    short-cadence configurations (KNOWN_FAILURES #3).
+0d. **Resumed done-records carry `numTurns`/`costUsd` from the CLI result JSON**, surfaced
+    in the notification and `taskwake status` — the cheap slice of "verified resume";
+    files-changed/tools-used reporting remains open (NEXT_STEPS).
+0e. **`done/` records pruned after 30 days during `reconcile`** — generous floor above the
+    7-day ceiling window; event-driven like everything else, no timer.
+0f. **`npm run lint`** = `node --check` over all JS plus a `vm.Script` parse of the
+    dashboard page's embedded `<script>` (the merge-seam class `node --check` can't see).
+
 ## 2026-08-06 — improvement pass
 
 1. **`npm test` uses bare `node --test`** (default glob), not a directory argument.

@@ -14,6 +14,12 @@ to DECISIONS.md or delete it.
 2. **"`npm test` failure is a sandbox quirk" — false.** Reproduced in a minimal fresh
    project on Node v22.22.2: `node --test <directory>` treats the directory as a literal
    test-file entry. Real breakage for any user on this Node line; fixed in package.json.
+3. **The review pass's gate-release fix introduced its own defect.** It handed the probe
+   gate back at a hardcoded `now + 60s`, ignoring a shorter configured `usagePollMs` —
+   every probing test after a skip/hold test silently stalled a minute, ballooning the
+   suite from ~4s to >120s (caught when the round-2 workspace tests pushed it over the
+   Bash timeout). Fixed to `min(CHUNK, usagePollMs)`; suite back to ~4s. Lesson recorded:
+   any absolute time constant inside `wait()` must be bounded by the configured cadence.
 
 ## Negative / not-worth-it results (deliberate non-optimizations)
 

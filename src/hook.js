@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readdir, stat, unlink } from 'node:fs/promises';
 import { cleanId, resetEpoch } from './core.js';
 import { t } from './i18n.js';
-import { aliveProcess, loadConfig, log, pendingDir, readJson, sessionsDir, writeAtomic } from './store.js';
+import { aliveProcess, loadConfig, log, pendingDir, readJson, sessionsDir, workspaceFingerprint, writeAtomic } from './store.js';
 
 const kinds = { rate_limit: 'usage', overloaded: 'overload', server_error: 'overload' };
 const ralphFile = (session) => join(dirname(pendingDir), 'ralph', `${cleanId(session)}.json`);
@@ -48,9 +48,14 @@ export async function saveEvent(input) {
   const errorType = input?.error_type ?? input?.error;
   let transcriptBytes = 0;
   try { transcriptBytes = (await stat(input.transcript_path)).size; } catch { /* no transcript */ }
+  // Captured now so the waiter can detect the repo changing under it while it waited
+  // (user commits, a colleague's push pulled in, another agent's edits). undefined when
+  // cwd is not a git repo — then no comparison ever happens.
+  const workspace = await workspaceFingerprint(input.cwd);
   const record = {
     session,
     cwd: input.cwd,
+    ...(workspace ? { workspace } : {}),
     transcriptPath: input.transcript_path,
     kind,
     errorType,
@@ -97,9 +102,31 @@ export function startWaiter(session) {
   child.unref();
 }
 
+const DONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+
+// done/ records feed `taskwake status`, the dashboard, and the weekly resume ceiling;
+// nothing needs them beyond the ceiling's 7-day window, so 30 days is a generous floor.
+// Piggybacks on reconcile so pruning is event-driven like everything else — no timer.
+async function pruneDone(now = Date.now()) {
+  const dir = join(dirname(pendingDir), 'done');
+  let names = [];
+  try { names = (await readdir(dir)).filter((name) => name.endsWith('.json')); } catch { return 0; }
+  let pruned = 0;
+  for (const name of names) {
+    const record = await readJson(join(dir, name));
+    if (record && Number.isFinite(record.finishedAt) && now - record.finishedAt > DONE_RETENTION_MS) {
+      await unlink(join(dir, name)).catch(() => {});
+      pruned++;
+    }
+  }
+  if (pruned) await log(`pruned ${pruned} done records older than 30d`);
+  return pruned;
+}
+
 // Re-arm waiters orphaned by a reboot or logout. Runs from the SessionStart hook,
 // so recovery is event-driven: no daemon, no timer to install or repair.
 export async function reconcile() {
+  await pruneDone();
   let names = [];
   try { names = (await readdir(pendingDir)).filter((name) => name.endsWith('.json')); } catch { return 0; }
   let spawned = 0;

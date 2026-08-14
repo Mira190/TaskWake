@@ -9,6 +9,7 @@
   },
   "scripts": {
     "test": "node --test",
+    "lint": "node scripts/lint.mjs",
     "bench": "node bench/parser-bench.mjs && node bench/snapshot-bench.mjs"
   },
   "engines": { "node": ">=20" },

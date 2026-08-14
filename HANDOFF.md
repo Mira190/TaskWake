@@ -65,6 +65,16 @@ copy that pattern (see top of `test/waiter.test.js`) for anything touching `stor
 
 ## Current state / what just happened
 
+Round 2 (2026-08-14) landed: `STATUSES` table in core.js now drives all status labels and
+priorities (the embedded dashboard page interpolates them — edit the table, not the page);
+workspace fingerprint hold (`workspacePolicy: "hold"` default — `saveEvent` captures git
+HEAD+dirty hash, waiter holds with `skipped-workspace-changed` if it moved); resumed
+done-records carry `numTurns`/`costUsd`; `reconcile` prunes done/ >30 days; `npm run lint`
+parses everything including the embedded dashboard JS. One self-inflicted defect caught and
+fixed: gate handbacks must be bounded by `usagePollMs` (KNOWN_FAILURES #3) — never put an
+absolute time constant inside `wait()`.
+
+
 - Upstream `main` (v1.2.2: hybrid visible-terminal resume, dashboard "Open session",
   Ralph-state cleanup) was merged; conflict resolutions are documented in DECISIONS #8–11.
 - This branch previously fixed the StopFailure field-precedence + `error_details` contract
@@ -78,10 +88,12 @@ copy that pattern (see top of `test/waiter.test.js`) for anything touching `stor
 
 ## Your work queue
 
-Take `NEXT_STEPS.md` top-down. #4 (status-vocabulary table), #5 (done/ pruning), #6 (lint
-script) are small, safe, and fully specified by their debt entries — good first tasks. #1–2
-need a live account / real OSes; if you have neither, skip to #3–#7. Anything in
-NEXT_STEPS #8 is deliberately deferred — don't pick it up without new evidence.
+Take `NEXT_STEPS.md` top-down. #1–2 need a live account / real OSes; without them, the
+remaining executable work is #3 (quota governor, checkpoint/handoff resume, files-changed
+reporting, Codex `resets_at`) — each larger than a first task, so read
+`docs/blindspot-analysis-2026-07.md` §8 Phase 2 before starting. Split
+`test/waiter.test.js` (#4) before adding to it. The deferred list is deliberate — don't
+pick it up without new evidence.
 
 ## Gotchas that will waste your time if you don't know them
 

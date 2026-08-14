@@ -4,19 +4,13 @@ import { unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { cleanId } from '../src/core.js';
+import { cleanId, statusLabel } from '../src/core.js';
 import { startDashboard } from '../src/dashboard.js';
 import { runCodex } from '../src/codex.js';
-import { locale, t } from '../src/i18n.js';
+import { chinese, locale, t } from '../src/i18n.js';
 import { doneDir, listJson, loadConfig, pendingDir, tailLog } from '../src/store.js';
 
-const statusName = (status) => ({
-  opened: t('opened in terminal', '已在终端打开'),
-  resumed: t('resumed', '已续跑'), 'resumed-idle': t('resumed, possibly idle', '已续跑（可能未实际工作）'),
-  bricked: t('session corrupted', '会话已损坏'), 'skipped-weekly': t('weekly limit skipped', '已跳过每周限额'),
-  'skipped-weekly-budget': t('weekly resume ceiling reached', '已达每周续跑上限'),
-  'skipped-context': t('large context skipped', '已跳过超大上下文'), 'gave-up': t('gave up', '已停止重试'),
-}[status] || status);
+const statusName = (status) => statusLabel(status, chinese);
 
 async function status() {
   const config = await loadConfig();
@@ -31,9 +25,13 @@ async function status() {
   }
   for (const item of done) {
     const at = new Date(item.finishedAt).toLocaleString(locale);
+    const cost = [
+      item.numTurns !== undefined ? t(`turns=${item.numTurns}`, `轮次=${item.numTurns}`) : '',
+      item.costUsd !== undefined ? `$${item.costUsd.toFixed(2)}` : '',
+    ].filter(Boolean).join('  ');
     process.stdout.write(t(
-      `${statusName(item.status)}  ${item.session}  ${item.errorType}  finished=${at}\n`,
-      `${statusName(item.status)}  ${item.session}  ${item.errorType}  完成=${at}\n`,
+      `${statusName(item.status)}  ${item.session}  ${item.errorType}  finished=${at}${cost ? '  ' + cost : ''}\n`,
+      `${statusName(item.status)}  ${item.session}  ${item.errorType}  完成=${at}${cost ? '  ' + cost : ''}\n`,
     ));
   }
   if (!pending.length && !done.length) process.stdout.write(t('No TaskWake activity recorded.\n', '暂无 TaskWake 活动记录。\n'));

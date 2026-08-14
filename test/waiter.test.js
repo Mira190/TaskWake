@@ -35,7 +35,7 @@ before(async () => {
   await writeFile(shimOk, `
     import { appendFile } from 'node:fs/promises';
     await appendFile(${JSON.stringify(callsFile)}, JSON.stringify(process.argv.slice(2)) + '\\n');
-    process.stdout.write('{"type":"result","result":"ok"}');
+    process.stdout.write('{"type":"result","is_error":false,"num_turns":3,"total_cost_usd":0.07,"result":"ok"}');
   `);
   await writeFile(shimLimited, `
     process.stdout.write("You've hit your session limit");
@@ -284,6 +284,8 @@ describe('waiter end to end', () => {
     assert.equal(code, 0);
     const done = await readJson(join(doneDir, 'e2e-1.json'));
     assert.equal(done.status, 'resumed');
+    assert.equal(done.numTurns, 3, 'turn count from the CLI result JSON is recorded');
+    assert.equal(done.costUsd, 0.07, 'cost from the CLI result JSON is recorded');
     assert.equal(await readJson(pending), undefined, 'pending cleared');
     const calls = (await readFile(callsFile, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
     assert.ok(calls.some((call) => call.includes('--resume') && call.includes('e2e-1')), `shim got ${calls}`);
@@ -441,6 +443,64 @@ describe('weekly auto-resume budget ceiling', () => {
     assert.notEqual(result.status, 'skipped-weekly-budget');
     assert.ok(current >= 0);
     await unlink(join(doneDir, 'budget-fill2.json')).catch(() => {});
+  });
+});
+
+describe('workspace fingerprint hold', () => {
+  const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+  const git = (repo, ...args) => new Promise((resolve, reject) => {
+    const child = spawn('git', args, { cwd: repo, env: gitEnv, stdio: 'ignore' });
+    child.once('exit', (code) => code === 0 ? resolve() : reject(new Error(`git ${args[0]} exited ${code}`)));
+  });
+  const pendingRecord = (session, repo, workspace) => ({
+    session, kind: 'usage', errorType: 'rate_limit', cwd: repo, workspace,
+    details: 'session limit', resetHint: Date.now(), transcriptBytes: 0,
+  });
+
+  it('holds when the repo changed while waiting, resumes when unchanged or policy is ignore', async () => {
+    const { workspaceFingerprint } = await import('../src/store.js');
+    const repo = join(tmp, 'ws-repo');
+    await writeFile(join(tmp, '.keep'), '');
+    await git(tmp, 'init', '-q', 'ws-repo');
+    await writeFile(join(repo, 'file.txt'), 'v1\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'v1');
+    const fingerprint = await workspaceFingerprint(repo);
+    assert.ok(fingerprint, 'a committed repo fingerprints');
+
+    await writeAtomic(join(pendingDir, 'ws-same.json'), pendingRecord('ws-same', repo, fingerprint));
+    const unchanged = await wait('ws-same', config([process.execPath, shimOk]));
+    assert.equal(unchanged.status, 'resumed', 'an unchanged workspace resumes normally');
+
+    await writeFile(join(repo, 'file.txt'), 'v2 dirty\n');
+    await writeAtomic(join(pendingDir, 'ws-changed.json'), pendingRecord('ws-changed', repo, fingerprint));
+    const held = await wait('ws-changed', config([process.execPath, shimOk]));
+    assert.equal(held.status, 'skipped-workspace-changed', 'a dirtied workspace holds the resume');
+
+    await writeAtomic(join(pendingDir, 'ws-ignored.json'), pendingRecord('ws-ignored', repo, fingerprint));
+    const ignored = await wait('ws-ignored', { ...config([process.execPath, shimOk]), workspacePolicy: 'ignore' });
+    assert.equal(ignored.status, 'resumed', 'policy ignore opts out of the hold');
+  });
+
+  it('never holds a session that could not be fingerprinted at interruption', async () => {
+    await writeAtomic(join(pendingDir, 'ws-none.json'), pendingRecord('ws-none', tmp, undefined));
+    const result = await wait('ws-none', config([process.execPath, shimOk]));
+    assert.equal(result.status, 'resumed');
+  });
+});
+
+describe('done record pruning', () => {
+  it('reconcile removes done records older than 30 days and keeps fresh ones', async () => {
+    await writeAtomic(join(doneDir, 'prune-old.json'), {
+      session: 'prune-old', status: 'resumed', finishedAt: Date.now() - 31 * 24 * 60 * 60 * 1_000,
+    });
+    await writeAtomic(join(doneDir, 'prune-new.json'), {
+      session: 'prune-new', status: 'resumed', finishedAt: Date.now() - 1_000,
+    });
+    await reconcile();
+    assert.equal(await readJson(join(doneDir, 'prune-old.json')), undefined, 'stale record pruned');
+    assert.ok(await readJson(join(doneDir, 'prune-new.json')), 'fresh record kept');
+    await unlink(join(doneDir, 'prune-new.json')).catch(() => {});
   });
 });
 

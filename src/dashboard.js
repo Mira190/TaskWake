@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { open, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { cleanId, pathsOverlap } from './core.js';
+import { cleanId, pathsOverlap, statusPriority } from './core.js';
 import { t } from './i18n.js';
 import { aliveProcess, home, pendingDir, doneDir, sessionsDir, listJson, loadConfig, log, openTerminal, readJson, tailLog } from './store.js';
 import { dashboardPage } from './dashboard-page.js';
@@ -167,11 +167,7 @@ export async function buildSnapshot() {
     }
   }
 
-  const priority = {
-    running: 0, active: 1, waiting: 2, orphaned: 3, stale: 4, ended: 5, opened: 6, resumed: 7, 'resumed-idle': 7,
-    bricked: 8, failed: 8, 'gave-up': 8, 'skipped-weekly-budget': 8, done: 9,
-  };
-  sessions.sort((a, b) => (priority[a.status] ?? 9) - (priority[b.status] ?? 9) || b.updatedAt - a.updatedAt);
+  sessions.sort((a, b) => statusPriority(a.status) - statusPriority(b.status) || b.updatedAt - a.updatedAt);
   return {
     generatedAt: Date.now(),
     summary: {

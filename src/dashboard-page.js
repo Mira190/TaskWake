@@ -1,3 +1,5 @@
+import { statusLabels } from './core.js';
+
 export const dashboardPage = String.raw`<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -137,13 +139,7 @@ export const dashboardPage = String.raw`<!doctype html>
         lede: 'Monitor Claude sessions, usage waits, automatic resumptions, and Ralph turns. Safely reopen idle sessions in a terminal.',
         connected: 'Connected locally', refresh: 'Refresh now', summary: 'Runtime summary', sessions: 'Claude sessions',
         sessionList: 'Claude session list', loading: 'Loading…', logs: 'TaskWake decision log', latest: 'Latest 50 lines',
-        status: {
-          active: 'Active', running: 'Resuming', waiting: 'Waiting to retry', orphaned: 'Awaiting recovery',
-          stale: 'Process missing', ended: 'Ended', opened: 'Opened in terminal', resumed: 'Resumed',
-          'resumed-idle': 'Resumed (possibly idle)', bricked: 'Session corrupted', 'gave-up': 'Retry stopped',
-          'skipped-weekly': 'Weekly limit', 'skipped-context': 'Manual reopen needed',
-          'skipped-weekly-budget': 'Weekly budget ceiling reached', failed: 'Resume failed', done: 'Completed',
-        },
+        status: ${JSON.stringify(statusLabels('en'))},
         metrics: [['active', 'Running'], ['waiting', 'Waiting / repair'], ['ralph', 'Ralph loops'], ['conflicts', 'Directory conflicts']],
         unknownCwd: 'Unknown working directory', conflict: 'Concurrency risk: multiple Claude sessions are working in the same or nested directory and may edit the same files.',
         resumePid: 'Resume PID', permission: 'Permission mode', model: 'Model', ralphTurns: 'Ralph turns', nextRetry: 'Next retry', failures: 'Failures', probes: 'Usage probes', lastActivity: 'Last activity',
@@ -157,12 +153,7 @@ export const dashboardPage = String.raw`<!doctype html>
         lede: '集中查看 Claude 会话、额度等待、自动续跑与 Ralph 轮次，并安全地在终端重新打开空闲会话。',
         connected: '本机已连接', refresh: '立即刷新', summary: '运行摘要', sessions: 'Claude 会话',
         sessionList: 'Claude 会话列表', loading: '正在读取…', logs: 'TaskWake 决策日志', latest: '最近 50 行',
-        status: {
-          active: '活动中', running: '自动续跑中', waiting: '等待重试', orphaned: '等待恢复', stale: '进程已失联',
-          ended: '已结束', opened: '已在终端打开', resumed: '已续跑', 'resumed-idle': '已续跑（可能未实际工作）',
-          bricked: '会话已损坏', 'gave-up': '已停止重试', 'skipped-weekly': '每周限额',
-          'skipped-context': '需手动重开', 'skipped-weekly-budget': '已达每周续跑上限', failed: '续跑失败', done: '已完成',
-        },
+        status: ${JSON.stringify(statusLabels('zh'))},
         metrics: [['active', '正在运行'], ['waiting', '等待 / 待修复'], ['ralph', 'Ralph 循环'], ['conflicts', '目录冲突']],
         unknownCwd: '工作目录未知', conflict: '并发风险：多个 Claude 正在相同或嵌套目录中运行，可能同时修改相同文件。',
         resumePid: '续跑 PID', permission: '权限模式', model: '模型', ralphTurns: 'Ralph 轮次', nextRetry: '下次重试', failures: '失败次数', probes: '额度探测', lastActivity: '最后活动',

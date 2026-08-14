@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import {
   classifyProbe, codexExecIndex, codexResumeArgs, codexStreamScanner, estimateTokens,
   failureKind, isWeekly, jsonCodexArgs, looksBricked, looksIdle, parseCliJsonResult,
-  readCodexJson, resetEpoch,
+  readCodexJson, resetEpoch, STATUSES, statusLabel, statusPriority,
 } from '../src/core.js';
 import { dashboardPage } from '../src/dashboard-page.js';
 import { isChineseLocale } from '../src/i18n.js';
@@ -42,6 +42,26 @@ describe('dashboard localization', () => {
     assert.match(dashboardPage, /navigator\.language/);
     assert.match(dashboardPage, /TaskWake Control Room/);
     assert.match(dashboardPage, /TaskWake 控制中心/);
+  });
+
+  it('embeds the status labels generated from the shared STATUSES table', () => {
+    assert.match(dashboardPage, /Opened in terminal/, 'en labels interpolated');
+    assert.match(dashboardPage, /已在终端打开/, 'zh labels interpolated');
+    assert.match(dashboardPage, /skipped-workspace-changed/, 'new statuses flow through without page edits');
+  });
+});
+
+describe('status table', () => {
+  it('labels and priorities come from one table, with safe fallbacks', () => {
+    assert.equal(statusLabel('resumed'), 'Resumed');
+    assert.equal(statusLabel('resumed', true), '已续跑');
+    assert.equal(statusLabel('some-unknown-status'), 'some-unknown-status');
+    assert.ok(statusPriority('running') < statusPriority('waiting'));
+    assert.ok(statusPriority('waiting') < statusPriority('done'));
+    assert.equal(statusPriority('some-unknown-status'), 9);
+    for (const [status, entry] of Object.entries(STATUSES)) {
+      assert.ok(entry.en && entry.zh && Number.isInteger(entry.priority), `complete entry for ${status}`);
+    }
   });
 });
 describe('failure classification', () => {

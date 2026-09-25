@@ -8,7 +8,7 @@ import {
 import { dashboardPage } from '../src/dashboard-page.js';
 import { isChineseLocale } from '../src/i18n.js';
 import { canShowTerminal, resumeArgv } from '../src/store.js';
-import { evaluateProbe, shouldOpenTerminal } from '../src/waiter.js';
+import { evaluateProbe, originalStillRunning, shouldOpenTerminal } from '../src/waiter.js';
 
 describe('visible resume policy', () => {
   it('opens only after the deadline on an interactive desktop', async () => {
@@ -64,6 +64,18 @@ describe('permission mode inheritance', () => {
       resumeArgv({ ...config, claudeCmd: ['claude', '--permission-mode', 'plan'] }, 's1', { permissionMode: 'auto' }),
       ['claude', '--permission-mode', 'plan', '--resume', 's1'],
     );
+  });
+});
+
+describe('original terminal warning', () => {
+  it('warns only for an active registry entry whose Claude is alive', () => {
+    const alive = (pid) => pid === 42;
+    assert.equal(originalStillRunning({ status: 'active', claudePid: 42 }, alive), true);
+    assert.equal(originalStillRunning({ status: 'active', claudePid: 7 }, alive), false);
+    assert.equal(originalStillRunning({ status: 'ended', claudePid: 42 }, alive), false);
+    assert.equal(originalStillRunning({ status: 'active' }, alive), false);
+    assert.equal(originalStillRunning(undefined, alive), false);
+    assert.equal(originalStillRunning({ status: 'active', claudePid: process.pid }), true);
   });
 });
 

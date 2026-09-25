@@ -101,6 +101,11 @@ export function evaluateProbe({ code, stdout = '', stderr = '' }) {
   return { ok: code === 0 && !kind, kind, text };
 }
 
+const aliveProcess = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+export function originalStillRunning(registry, isAlive = aliveProcess) {
+  return registry?.status === 'active' && Number.isInteger(registry.claudePid) && registry.claudePid > 0 && isAlive(registry.claudePid);
+}
+
 export async function shouldOpenTerminal(kind, mode, deadline, now = Date.now(), env = process.env, platform = process.platform, probe, oversized = false) {
   return (kind === 'usage' || (kind === 'overload' && oversized)) && mode !== 'headless' && now >= deadline
     && await canShowTerminal(env, platform, probe);
@@ -110,7 +115,8 @@ export async function wait(session, config) {
   const file = join(pendingDir, `${cleanId(session)}.json`);
   const state = await readJson(file);
   if (!state) return undefined;
-  const registry = await readJson(join(sessionsDir, `${cleanId(session)}.json`));
+  const registryFile = join(sessionsDir, `${cleanId(session)}.json`);
+  const registry = await readJson(registryFile);
   state.waiterPid = process.pid;
   state.attempts ||= 0;
   state.probes ||= 0;
@@ -136,6 +142,13 @@ export async function wait(session, config) {
   const sleepUntil = (now = Date.now()) => (state.kind !== 'usage'
     ? now + jitter(config.overloadMs[Math.min(state.attempts, config.overloadMs.length - 1)])
     : trusted || oversized ? deadline : nextUsageCheck(deadline, config, now));
+  // Resuming never blocks on a live original terminal; it only warns (re-read: it may have exited meanwhile).
+  const originalWarning = async () => {
+    const current = await readJson(registryFile);
+    if (!originalStillRunning(current)) return '';
+    await log(`original claude still running pid=${current.claudePid} session=${session}`);
+    return ` ${t('Original terminal still open; close it to avoid two Claudes on one transcript.', '原终端仍在运行，请关闭它以免两个 Claude 同时写入同一会话。')}`;
+  };
   let until = sleepUntil();
   state.nextTry = until;
   await writeAtomic(file, state);
@@ -159,9 +172,10 @@ export async function wait(session, config) {
 
     if (await shouldOpenTerminal(state.kind, config.resumeMode, deadline, Date.now(), process.env, process.platform, undefined, oversized)) {
       try {
+        const warning = await originalWarning();
         const terminalPid = await openTerminal([...resumeArgv(config, session, registry), config.retryText], state.cwd);
         if (wasUsage) await setUsageGate(session, Date.now() + config.usageResumeSpacingMs, 'opened');
-        notify('TaskWake', t('Session opened in a terminal.', '会话已在终端中打开。'), config);
+        notify('TaskWake', t('Session opened in a terminal.', '会话已在终端中打开。') + warning, config);
         return finish('opened', { attempts: state.probes, terminalPid });
       } catch (error) {
         await log(`visible resume failed session=${session} error=${error.message}; falling back headless`);
@@ -172,6 +186,7 @@ export async function wait(session, config) {
       return finish('skipped-context');
     }
 
+    const warning = await originalWarning();
     state.probes++;
     const started = Date.now();
     await log(`probe session=${session} probe=${state.probes} failures=${state.attempts}`);
@@ -188,7 +203,7 @@ export async function wait(session, config) {
     const { ok, kind, text: combined } = evaluateProbe(result);
     if (ok) {
       if (wasUsage) await setUsageGate(session, Date.now() + config.usageResumeSpacingMs, 'resumed');
-      notify('TaskWake', t(`Session resumed. Reopen: claude --resume ${session}`, `会话已续跑。重新打开：claude --resume ${session}`), config);
+      notify('TaskWake', t(`Session resumed. Reopen: claude --resume ${session}`, `会话已续跑。重新打开：claude --resume ${session}`) + warning, config);
       return finish('resumed', { attempts: state.probes });
     }
 

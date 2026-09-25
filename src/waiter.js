@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { cleanId, failureKind, isWeekly, resetEpoch } from './core.js';
 import { t } from './i18n.js';
-import { canShowTerminal, doneDir, home, loadConfig, log, notify, openTerminal, pendingDir, readJson, runCommand, writeAtomic } from './store.js';
+import { canShowTerminal, doneDir, home, loadConfig, log, notify, openTerminal, pendingDir, readJson, resumeArgv, runCommand, sessionsDir, writeAtomic } from './store.js';
 
 const CHUNK = 60_000; // local cancellation/clock check; this never calls Claude
 const GATE_STALE_MS = 2 * 60_000;
@@ -110,6 +110,7 @@ export async function wait(session, config) {
   const file = join(pendingDir, `${cleanId(session)}.json`);
   const state = await readJson(file);
   if (!state) return undefined;
+  const registry = await readJson(join(sessionsDir, `${cleanId(session)}.json`));
   state.waiterPid = process.pid;
   state.attempts ||= 0;
   state.probes ||= 0;
@@ -158,7 +159,7 @@ export async function wait(session, config) {
 
     if (await shouldOpenTerminal(state.kind, config.resumeMode, deadline, Date.now(), process.env, process.platform, undefined, oversized)) {
       try {
-        const terminalPid = await openTerminal([...config.claudeCmd, '--resume', session, config.retryText], state.cwd);
+        const terminalPid = await openTerminal([...resumeArgv(config, session, registry), config.retryText], state.cwd);
         if (wasUsage) await setUsageGate(session, Date.now() + config.usageResumeSpacingMs, 'opened');
         notify('TaskWake', t('Session opened in a terminal.', '会话已在终端中打开。'), config);
         return finish('opened', { attempts: state.probes, terminalPid });
@@ -175,7 +176,7 @@ export async function wait(session, config) {
     const started = Date.now();
     await log(`probe session=${session} probe=${state.probes} failures=${state.attempts}`);
     const result = await runCommand(
-      [...config.claudeCmd, '--resume', session, '-p', config.retryText, '--output-format', 'json'],
+      [...resumeArgv(config, session, registry), '-p', config.retryText, '--output-format', 'json'],
       {
         ...(state.cwd ? { cwd: state.cwd } : {}),
         onSpawn: (pid) => {

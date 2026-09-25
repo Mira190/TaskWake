@@ -185,9 +185,18 @@ Optional config at `~/.taskwake.json`:
 | `maxContextResume` | `2000000` (bytes)                    |
 | `weeklyPolicy`     | `"notify"` (`"resume"` to auto-resume) |
 | `claudeCmd`        | `["claude"]`                         |
+| `inheritPermissionMode` | `true` (`false` to resume without `--permission-mode`) |
 | `ralph`            | `false`                                |
 | `ralphMaxTurns`    | `20`                                   |
 | `notify`           | `"toast"` (`"none"` to disable)      |
+
+Resumes inherit the interrupted session's permission mode. Headless `claude -p` denies
+every tool that needs permission unless a mode is given, so TaskWake adds
+`--permission-mode <mode>` from the session registry when the session ran in
+`acceptEdits`, `plan`, `auto`, `dontAsk`, or `bypassPermissions` and `claudeCmd` does not
+already set `--permission-mode`. This applies to visible terminals, headless probes, and
+the dashboard's **Open session**. A `bypassPermissions` session resumes with
+`bypassPermissions`. Set `"inheritPermissionMode": false` to opt out.
 
 State lives in `~/.taskwake/` (flat JSON files; delete the directory to reset).
 

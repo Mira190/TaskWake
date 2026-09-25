@@ -7,7 +7,7 @@ import {
 } from '../src/core.js';
 import { dashboardPage } from '../src/dashboard-page.js';
 import { isChineseLocale } from '../src/i18n.js';
-import { canShowTerminal } from '../src/store.js';
+import { canShowTerminal, resumeArgv } from '../src/store.js';
 import { evaluateProbe, shouldOpenTerminal } from '../src/waiter.js';
 
 describe('visible resume policy', () => {
@@ -48,6 +48,22 @@ describe('headless probe evaluation', () => {
     );
     assert.equal(evaluateProbe({ code: 0, stdout: 'done', stderr: '' }).ok, true);
     assert.equal(evaluateProbe({ code: 2, stdout: JSON.stringify({ is_error: true, subtype: 'error_during_execution' }), stderr: '' }).kind, undefined);
+  });
+});
+
+describe('permission mode inheritance', () => {
+  it('resumes with the registered mode unless disabled or already configured', () => {
+    const config = { claudeCmd: ['claude'], inheritPermissionMode: true };
+    assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'acceptEdits' }), ['claude', '--resume', 's1', '--permission-mode', 'acceptEdits']);
+    assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'bypassPermissions' }).slice(-1), ['bypassPermissions']);
+    assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'default' }), ['claude', '--resume', 's1']);
+    assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'weird; rm -rf' }), ['claude', '--resume', 's1']);
+    assert.deepEqual(resumeArgv(config, 's1', undefined), ['claude', '--resume', 's1']);
+    assert.deepEqual(resumeArgv({ ...config, inheritPermissionMode: false }, 's1', { permissionMode: 'auto' }), ['claude', '--resume', 's1']);
+    assert.deepEqual(
+      resumeArgv({ ...config, claudeCmd: ['claude', '--permission-mode', 'plan'] }, 's1', { permissionMode: 'auto' }),
+      ['claude', '--permission-mode', 'plan', '--resume', 's1'],
+    );
   });
 });
 

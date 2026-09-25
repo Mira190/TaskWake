@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { cleanId, pathsOverlap } from './core.js';
 import { t } from './i18n.js';
-import { home, pendingDir, doneDir, sessionsDir, loadConfig, log, openTerminal, readJson, tailLog } from './store.js';
+import { home, pendingDir, doneDir, sessionsDir, loadConfig, log, openTerminal, readJson, resumeArgv, tailLog } from './store.js';
 import { dashboardPage } from './dashboard-page.js';
 
 const ralphDir = join(home, 'ralph');
@@ -183,7 +183,7 @@ export function canOpenSession(item) {
 
 async function openSessionTerminal(item) {
   const config = await loadConfig();
-  await openTerminal([...config.claudeCmd, '--resume', item.session], item.cwd || homedir());
+  await openTerminal(resumeArgv(config, item.session, item), item.cwd || homedir());
 }
 
 async function readBody(request, limit = 4_096) {

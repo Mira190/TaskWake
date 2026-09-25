@@ -303,6 +303,17 @@ describe('waiter end to end', () => {
   });
 });
 
+describe('waiter permission mode', () => {
+  it('passes the registered permission mode to the headless probe', async () => {
+    await trackSession({ session_id: 'perm-1', cwd: tmp, permission_mode: 'acceptEdits' }, true, process.pid);
+    await writeAtomic(join(pendingDir, 'perm-1.json'), usageRecord('perm-1', { resetHint: Date.now() }));
+    assert.equal((await wait('perm-1', config([process.execPath, shimOk]))).status, 'resumed');
+    const calls = (await readFile(callsFile, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+    const call = calls.find((item) => item.includes('perm-1'));
+    assert.deepEqual(call.slice(call.indexOf('--resume'), call.indexOf('-p')), ['--resume', 'perm-1', '--permission-mode', 'acceptEdits']);
+  });
+});
+
 describe('waiter deadline state machine', () => {
   it('never probes before a trusted deadline', async () => {
     const now = Date.now();

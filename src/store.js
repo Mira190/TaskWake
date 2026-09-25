@@ -39,11 +39,22 @@ export async function loadConfig() {
       config.claudeCmd = raw.claudeCmd;
     }
     if (typeof raw.ralph === 'boolean') config.ralph = raw.ralph;
+    if (typeof raw.inheritPermissionMode === 'boolean') config.inheritPermissionMode = raw.inheritPermissionMode;
     if (Number.isInteger(raw.ralphMaxTurns) && raw.ralphMaxTurns > 0) config.ralphMaxTurns = raw.ralphMaxTurns;
     if (['notify', 'resume'].includes(raw.weeklyPolicy)) config.weeklyPolicy = raw.weeklyPolicy;
     if (['toast', 'none'].includes(raw.notify)) config.notify = raw.notify;
   } catch { /* no config file */ }
   return config;
+}
+
+// Headless `claude -p` denies every tool needing permission unless a mode is given,
+// so resume with the mode the interactive session was registered with.
+const inheritedModes = new Set(['acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions']);
+export function resumeArgv(config, session, registry) {
+  const mode = registry?.permissionMode;
+  const explicit = config.claudeCmd.some((arg) => arg === '--permission-mode' || arg.startsWith('--permission-mode='));
+  const inherit = config.inheritPermissionMode && inheritedModes.has(mode) && !explicit;
+  return [...config.claudeCmd, '--resume', session, ...(inherit ? ['--permission-mode', mode] : [])];
 }
 
 export async function readJson(path) {

@@ -15,6 +15,7 @@ export const defaults = Object.freeze({
   weeklyPolicy: 'notify',
   notify: 'toast',
   claudeCmd: ['claude'],
+  inheritPermissionMode: true,
   ralph: false,
   ralphMaxTurns: 20,
 });

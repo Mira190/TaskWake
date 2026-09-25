@@ -120,22 +120,43 @@ export async function canShowTerminal(env = process.env, platform = process.plat
 
 const shellQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 
+// Spawn the first candidate that exists; a missing binary (ENOENT) falls through to the next.
+export function openWithCandidates(candidates, cwd = homedir()) {
+  return new Promise((resolve, reject) => {
+    const attempt = (index, lastError) => {
+      if (index >= candidates.length) { reject(lastError || new Error('No terminal candidates')); return; }
+      const [command, args] = candidates[index];
+      const child = spawn(command, args, { cwd, detached: true, stdio: 'ignore', windowsHide: false });
+      child.once('spawn', () => { child.unref(); resolve(child.pid); });
+      child.once('error', (error) => (error.code === 'ENOENT' ? attempt(index + 1, error) : reject(error)));
+    };
+    attempt(0);
+  });
+}
+
+export function linuxTerminals(argv, env = process.env) {
+  return [
+    ...(env.TERMINAL ? [[env.TERMINAL, ['-e', ...argv]]] : []),
+    ['x-terminal-emulator', ['-e', ...argv]],
+    ['gnome-terminal', ['--', ...argv]],
+    ['konsole', ['-e', ...argv]],
+    ['xfce4-terminal', ['-x', ...argv]],
+    ['kitty', argv],
+    ['alacritty', ['-e', ...argv]],
+    ['xterm', ['-e', ...argv]],
+  ];
+}
+
 export function openTerminal(argv, cwd = homedir()) {
-  let command;
   if (process.platform === 'win32') {
     const line = argv.map((part) => `"${String(part).replaceAll('"', '')}"`).join(' ');
-    command = ['cmd.exe', ['/d', '/c', 'start', '', 'cmd.exe', '/d', '/k', line]];
-  } else if (process.platform === 'darwin') {
-    const line = `cd ${shellQuote(cwd)} && exec ${argv.map(shellQuote).join(' ')}`;
-    command = ['osascript', ['-e', `tell application "Terminal" to do script ${JSON.stringify(line)}`]];
-  } else {
-    command = ['x-terminal-emulator', ['-e', ...argv]];
+    return openWithCandidates([['cmd.exe', ['/d', '/c', 'start', '', 'cmd.exe', '/d', '/k', line]]], cwd);
   }
-  const child = spawn(command[0], command[1], { cwd, detached: true, stdio: 'ignore', windowsHide: false });
-  return new Promise((resolve, reject) => {
-    child.once('spawn', () => { child.unref(); resolve(child.pid); });
-    child.once('error', reject);
-  });
+  if (process.platform === 'darwin') {
+    const line = `cd ${shellQuote(cwd)} && exec ${argv.map(shellQuote).join(' ')}`;
+    return openWithCandidates([['osascript', ['-e', `tell application "Terminal" to do script ${JSON.stringify(line)}`]]], cwd);
+  }
+  return openWithCandidates(linuxTerminals(argv), cwd);
 }
 
 const toastScript = (title, body) => `

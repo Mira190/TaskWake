@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { describe, it } from 'node:test';
 import {
   codexExecIndex, codexResumeArgs, failureKind, isWeekly,
@@ -7,7 +8,7 @@ import {
 } from '../src/core.js';
 import { dashboardPage } from '../src/dashboard-page.js';
 import { isChineseLocale } from '../src/i18n.js';
-import { canShowTerminal, resumeArgv } from '../src/store.js';
+import { canShowTerminal, linuxTerminals, openWithCandidates, resumeArgv } from '../src/store.js';
 import { evaluateProbe, originalStillRunning, shouldOpenTerminal } from '../src/waiter.js';
 
 describe('visible resume policy', () => {
@@ -76,6 +77,21 @@ describe('original terminal warning', () => {
     assert.equal(originalStillRunning({ status: 'active' }, alive), false);
     assert.equal(originalStillRunning(undefined, alive), false);
     assert.equal(originalStillRunning({ status: 'active', claudePid: process.pid }), true);
+  });
+});
+
+describe('terminal fallback chain', () => {
+  it('skips a missing terminal binary and spawns the next candidate', async () => {
+    const pid = await openWithCandidates([['taskwake-no-such-terminal', ['-e', 'x']], [process.execPath, ['-e', '']]], tmpdir());
+    assert.ok(Number.isInteger(pid) && pid > 0);
+    await assert.rejects(openWithCandidates([['taskwake-no-such-terminal', []]], tmpdir()), { code: 'ENOENT' });
+  });
+
+  it('prefers $TERMINAL and uses each emulator\'s own exec flag', () => {
+    const list = linuxTerminals(['claude', '--resume', 's'], { TERMINAL: 'foot' });
+    assert.deepEqual(list.map(([command]) => command), ['foot', 'x-terminal-emulator', 'gnome-terminal', 'konsole', 'xfce4-terminal', 'kitty', 'alacritty', 'xterm']);
+    assert.deepEqual(list[2], ['gnome-terminal', ['--', 'claude', '--resume', 's']]);
+    assert.equal(linuxTerminals(['claude'], {})[0][0], 'x-terminal-emulator');
   });
 });
 

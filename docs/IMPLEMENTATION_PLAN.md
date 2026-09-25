@@ -1,6 +1,6 @@
 # TaskWake v1.3.0 — Implementation Plan
 
-Status: approved for execution on branch `claude/adoring-galileo-2gov7j`.
+Status: implemented in v1.3.0 on branch `claude/adoring-galileo-2gov7j` (all 12 work items; see CHANGELOG.md).
 Scope: correctness fixes to the waiter state machine and hook plumbing, safer
 resume behaviour, dashboard hardening, and test/CI hygiene. No new runtime
 dependencies. Node 20 must keep working (CI matrix below enforces it).

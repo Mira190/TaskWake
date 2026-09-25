@@ -95,6 +95,18 @@ describe('reset scheduling', () => {
     assert.equal(resetEpoch('usage limit · resets in: 3 hours', 1_000), 10_801_000);
   });
 
+  it('parses the pipe-epoch and compact relative forms', () => {
+    assert.equal(resetEpoch('Claude AI usage limit reached|1893456000', 0), 1_893_456_000_000);
+    assert.equal(resetEpoch('Claude AI usage limit reached|1893456000123', 0), 1_893_456_000_123);
+    assert.equal(resetEpoch('Claude AI usage limit reached|1893456000', 1_900_000_000_000), 1_900_000_000_000, 'never in the past');
+    assert.equal(resetEpoch('resets in 2h 30m', 1_000), 1_000 + 9_000_000);
+    assert.equal(resetEpoch('resets 2h30m', 1_000), 1_000 + 9_000_000);
+    assert.equal(resetEpoch('try again in 1 hr 5 min', 1_000), 1_000 + 3_900_000);
+    assert.equal(resetEpoch('usage limit · resets in 45m', 1_000), 1_000 + 2_700_000);
+    assert.equal(resetEpoch('wait 90 mins', 1_000), 1_000 + 5_400_000);
+    assert.ok(Number.isNaN(resetEpoch('resets in 5 months', 1_000, Number.NaN)), 'no unit prefix match');
+  });
+
   it('parses the dated form', () => {
     const result = resetEpoch('try again at Jul 5th, 2030 4:09 PM UTC', 0);
     assert.equal(result, Date.parse('Jul 5, 2030 4:09 PM UTC'));
@@ -108,12 +120,15 @@ describe('reset scheduling', () => {
     );
   });
 
-  it('rolls a yearly reset forward and resolves ambiguous clock times', () => {
+  it('rolls a yearless reset forward only when it lands within 8 days, and resolves ambiguous clock times', () => {
     const now = Date.parse('2030-10-10T00:00:00Z');
+    assert.ok(Number.isNaN(resetEpoch('weekly limit; resets Oct 9, 10am UTC', now, Number.NaN)), 'stale date is untrusted');
+    assert.equal(resetEpoch('weekly limit; resets Oct 9, 10am UTC', now, 500), now + 500);
     assert.equal(
-      resetEpoch('weekly limit; resets Oct 9, 10am UTC', now),
-      Date.parse('2031-10-09T10:00:00Z'),
+      resetEpoch('weekly limit; resets Jan 2, 10am UTC', Date.parse('2030-12-30T00:00:00Z'), Number.NaN),
+      Date.parse('2031-01-02T10:00:00Z'),
     );
+    assert.equal(resetEpoch('resets Oct 9, 2031 10am UTC', now, Number.NaN), Date.parse('2031-10-09T10:00:00Z'), 'explicit year kept');
     assert.equal(
       resetEpoch('usage limit resets 5 (UTC)', Date.parse('2030-01-01T04:00:00Z')),
       Date.parse('2030-01-01T05:00:00Z'),

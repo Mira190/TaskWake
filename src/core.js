@@ -78,14 +78,19 @@ function clockEpoch(hour, minute, zone, now) {
   return epoch;
 }
 
+const unit = '(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?![a-z])';
+const relativeForm = new RegExp(`(?:try again|reset\\w*|wait|\\bin)(?:\\s+(?:at|in))?\\s*:?\\s*(\\d+(?:\\.\\d+)?)\\s*${unit}(?:\\s*(\\d+)\\s*${unit})?`, 'i');
+const unitMs = (name) => (/^h/i.test(name) ? HOUR : /^m/i.test(name) ? 60_000 : 1_000);
+
 // ponytail: parsed times are hints, not truth — the waiter verifies by probing,
 // so a wrong parse costs one bounded extra wait, never a lost night.
 export function resetEpoch(message = '', now = Date.now(), fallbackMs = defaults.fallbackMs) {
-  const relative = message.match(/(?:try again|reset\w*|wait)(?:\s+(?:at|in))?\s*:?\s*(\d+(?:\.\d+)?)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?)/i);
+  const piped = message.match(/limit reached\|(\d{10,13})/i);
+  if (piped) return Math.max(now, Number(piped[1]) * (piped[1].length === 13 ? 1 : 1_000));
+
+  const relative = message.match(relativeForm);
   if (relative) {
-    const unit = relative[2].toLowerCase();
-    const scale = unit.startsWith('h') ? HOUR : unit.startsWith('m') ? 60_000 : 1_000;
-    return now + Number(relative[1]) * scale;
+    return now + Number(relative[1]) * unitMs(relative[2]) + (relative[3] ? Number(relative[3]) * unitMs(relative[4]) : 0);
   }
 
   const dated = message.match(/(?:try again at|resets?(?: at)?)\s+([A-Z][a-z]{2,8})\s+(\d{1,2})(?:st|nd|rd|th)?(?:,\s*|\s+)(?:(\d{4})\s+)?(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s+([A-Z]{2,5}))?/i);
@@ -98,6 +103,7 @@ export function resetEpoch(message = '', now = Date.now(), fallbackMs = defaults
       year++;
       epoch = parse();
     }
+    if (!dated[3] && epoch - now > 8 * 24 * HOUR) return now + fallbackMs; // stale yearless date: untrusted
     if (Number.isFinite(epoch)) return Math.max(now, epoch);
   }
 

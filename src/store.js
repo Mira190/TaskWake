@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { defaults } from './core.js';
@@ -38,7 +38,9 @@ export async function loadConfig() {
     if (Array.isArray(raw.claudeCmd) && raw.claudeCmd.length && raw.claudeCmd.every((item) => typeof item === 'string')) {
       config.claudeCmd = raw.claudeCmd;
     }
+    if (Number.isInteger(raw.overloadMaxAttempts) && raw.overloadMaxAttempts >= 1) config.overloadMaxAttempts = raw.overloadMaxAttempts;
     if (typeof raw.ralph === 'boolean') config.ralph = raw.ralph;
+    if (typeof raw.inheritPermissionMode === 'boolean') config.inheritPermissionMode = raw.inheritPermissionMode;
     if (Number.isInteger(raw.ralphMaxTurns) && raw.ralphMaxTurns > 0) config.ralphMaxTurns = raw.ralphMaxTurns;
     if (['notify', 'resume'].includes(raw.weeklyPolicy)) config.weeklyPolicy = raw.weeklyPolicy;
     if (['toast', 'none'].includes(raw.notify)) config.notify = raw.notify;
@@ -46,15 +48,55 @@ export async function loadConfig() {
   return config;
 }
 
+// Headless `claude -p` denies every tool needing permission unless a mode is given,
+// so resume with the mode the interactive session was registered with.
+// `plan` is left out: a headless plan-mode turn cannot leave planning, so it would "succeed" without working.
+const inheritedModes = new Set(['acceptEdits', 'auto', 'dontAsk', 'bypassPermissions']);
+export function resumeArgv(config, session, registry) {
+  const mode = registry?.permissionMode;
+  const explicit = config.claudeCmd.some((arg) => arg === '--permission-mode' || arg.startsWith('--permission-mode='));
+  const inherit = config.inheritPermissionMode && inheritedModes.has(mode) && !explicit;
+  return [...config.claudeCmd, '--resume', session, ...(inherit ? ['--permission-mode', mode] : [])];
+}
+
 export async function readJson(path) {
   try { return JSON.parse(await readFile(path, 'utf8')); } catch { return undefined; }
 }
 
+export const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+export function aliveProcess(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+let writes = 0;
+// Windows refuses to replace a file another rename or reader holds (EPERM/EBUSY), so retry briefly.
 export async function writeAtomic(path, value) {
   await mkdir(dirname(path), { recursive: true });
-  const temporary = `${path}.${process.pid}`;
+  const temporary = `${path}.${process.pid}.${writes++}.${Math.random().toString(36).slice(2)}`;
   await writeFile(temporary, JSON.stringify(value, null, 1));
-  await rename(temporary, path);
+  for (let attempt = 0; ; attempt++) {
+    try { await rename(temporary, path); return; }
+    catch (error) {
+      if (!['EPERM', 'EBUSY', 'EACCES'].includes(error.code) || attempt >= 10) {
+        await unlink(temporary).catch(() => {});
+        throw error;
+      }
+      await pause(5 * (attempt + 1));
+    }
+  }
+}
+
+// Keep the newest `keep` outcomes and drop anything older than `maxAgeMs`.
+export async function pruneDone(dir = doneDir, now = Date.now(), keep = 100, maxAgeMs = 30 * 86_400_000) {
+  let names;
+  try { names = (await readdir(dir)).filter((name) => name.endsWith('.json')); } catch { return 0; }
+  const records = await Promise.all(names.map(async (name) => ({ name, at: (await readJson(join(dir, name)))?.finishedAt || 0 })));
+  records.sort((a, b) => b.at - a.at);
+  const stale = records.filter((record, index) => index >= keep || record.at < now - maxAgeMs);
+  await Promise.all(stale.map(({ name }) => unlink(join(dir, name)).catch(() => {})));
+  return stale.length;
 }
 
 export async function log(text) {
@@ -108,22 +150,54 @@ export async function canShowTerminal(env = process.env, platform = process.plat
 
 const shellQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 
+// Spawn the first candidate that works: a missing binary (ENOENT) or one that exits non-zero
+// within the grace period (an emulator rejecting its arguments) falls through to the next.
+export function openWithCandidates(candidates, cwd = homedir(), graceMs = 1_000) {
+  return new Promise((resolve, reject) => {
+    const attempt = (index, lastError) => {
+      if (index >= candidates.length) { reject(lastError || new Error('No terminal candidates')); return; }
+      const [command, args] = candidates[index];
+      const child = spawn(command, args, { cwd, detached: true, stdio: 'ignore', windowsHide: false });
+      let settled = false;
+      const settle = (action) => { if (!settled) { settled = true; action(); } };
+      child.once('error', (error) => settle(() => (error.code === 'ENOENT' ? attempt(index + 1, error) : reject(error))));
+      child.once('spawn', () => {
+        child.unref();
+        const timer = setTimeout(() => settle(() => resolve(child.pid)), graceMs); // kept referenced so the caller's loop waits
+        child.once('exit', (code) => {
+          if (!code) return; // gnome-terminal hands off to its server and exits 0 at once
+          clearTimeout(timer);
+          settle(() => attempt(index + 1, new Error(`${command} exited with code ${code}`)));
+        });
+      });
+    };
+    attempt(0);
+  });
+}
+
+export function linuxTerminals(argv, env = process.env) {
+  return [
+    ...(env.TERMINAL ? [[env.TERMINAL, ['-e', ...argv]]] : []),
+    ['x-terminal-emulator', ['-e', ...argv]],
+    ['gnome-terminal', ['--', ...argv]],
+    ['konsole', ['-e', ...argv]],
+    ['xfce4-terminal', ['-x', ...argv]],
+    ['kitty', argv],
+    ['alacritty', ['-e', ...argv]],
+    ['xterm', ['-e', ...argv]],
+  ];
+}
+
 export function openTerminal(argv, cwd = homedir()) {
-  let command;
   if (process.platform === 'win32') {
     const line = argv.map((part) => `"${String(part).replaceAll('"', '')}"`).join(' ');
-    command = ['cmd.exe', ['/d', '/c', 'start', '', 'cmd.exe', '/d', '/k', line]];
-  } else if (process.platform === 'darwin') {
-    const line = `cd ${shellQuote(cwd)} && exec ${argv.map(shellQuote).join(' ')}`;
-    command = ['osascript', ['-e', `tell application "Terminal" to do script ${JSON.stringify(line)}`]];
-  } else {
-    command = ['x-terminal-emulator', ['-e', ...argv]];
+    return openWithCandidates([['cmd.exe', ['/d', '/c', 'start', '', 'cmd.exe', '/d', '/k', line]]], cwd);
   }
-  const child = spawn(command[0], command[1], { cwd, detached: true, stdio: 'ignore', windowsHide: false });
-  return new Promise((resolve, reject) => {
-    child.once('spawn', () => { child.unref(); resolve(child.pid); });
-    child.once('error', reject);
-  });
+  if (process.platform === 'darwin') {
+    const line = `cd ${shellQuote(cwd)} && exec ${argv.map(shellQuote).join(' ')}`;
+    return openWithCandidates([['osascript', ['-e', `tell application "Terminal" to do script ${JSON.stringify(line)}`]]], cwd);
+  }
+  return openWithCandidates(linuxTerminals(argv), cwd);
 }
 
 const toastScript = (title, body) => `

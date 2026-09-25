@@ -22,7 +22,10 @@ function streamCodex(args) {
     child.stdout.on('data', watch(process.stdout));
     child.stderr.on('data', watch(process.stderr));
     child.once('error', (error) => { process.stderr.write(`${error.message}\n`); resolve({ code: 1, tail, thread }); });
-    child.once('exit', (code) => resolve({ code: code ?? 1, tail, thread }));
+    child.once('exit', (code) => {
+      thread ||= readCodexJson(tail).thread; // a JSONL line split across chunks
+      resolve({ code: code ?? 1, tail, thread });
+    });
   });
 }
 

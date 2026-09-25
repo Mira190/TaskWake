@@ -1,14 +1,15 @@
 import { strict as assert } from 'node:assert';
 import { readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { describe, it } from 'node:test';
 import {
   codexExecIndex, codexResumeArgs, failureKind, isWeekly,
   jsonCodexArgs, readCodexJson, resetEpoch,
 } from '../src/core.js';
 import { dashboardPage } from '../src/dashboard-page.js';
-import { isChineseLocale } from '../src/i18n.js';
-import { canShowTerminal } from '../src/store.js';
-import { shouldOpenTerminal } from '../src/waiter.js';
+import { isChineseLocale, useChinese } from '../src/i18n.js';
+import { canShowTerminal, linuxTerminals, openWithCandidates, resumeArgv } from '../src/store.js';
+import { evaluateProbe, originalStillRunning, shouldOpenTerminal } from '../src/waiter.js';
 
 describe('visible resume policy', () => {
   it('opens only after the deadline on an interactive desktop', async () => {
@@ -28,12 +29,91 @@ describe('visible resume policy', () => {
   });
 });
 
+describe('headless probe evaluation', () => {
+  it('trusts the JSON result envelope over banner regexes', () => {
+    const success = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'Fixed the rate limit reset bug; try again in 5 minutes.' });
+    assert.deepEqual(evaluateProbe({ code: 0, stdout: success, stderr: '' }), { ok: true, kind: undefined, text: '' });
+    const limited = JSON.stringify({ type: 'result', is_error: true, result: "You've hit your session limit · resets 3pm" });
+    const failed = evaluateProbe({ code: 1, stdout: limited, stderr: '' });
+    assert.equal(failed.ok, false);
+    assert.equal(failed.kind, 'usage');
+    assert.match(failed.text, /session limit/);
+  });
+
+  it('reads the last result line of JSONL and falls back to plain text', () => {
+    const jsonl = [JSON.stringify({ type: 'system' }), JSON.stringify({ type: 'result', is_error: false, result: 'usage limit' })].join('\n');
+    assert.equal(evaluateProbe({ code: 0, stdout: jsonl, stderr: '' }).ok, true);
+    assert.deepEqual(
+      { ...evaluateProbe({ code: 1, stdout: "You've hit your session limit", stderr: '' }), text: undefined },
+      { ok: false, kind: 'usage', text: undefined },
+    );
+    assert.equal(evaluateProbe({ code: 0, stdout: 'done', stderr: '' }).ok, true);
+    assert.equal(evaluateProbe({ code: 2, stdout: JSON.stringify({ is_error: true, subtype: 'error_during_execution' }), stderr: '' }).kind, undefined);
+  });
+});
+
+describe('permission mode inheritance', () => {
+  it('resumes with the registered mode unless disabled or already configured', () => {
+    const config = { claudeCmd: ['claude'], inheritPermissionMode: true };
+    assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'acceptEdits' }), ['claude', '--resume', 's1', '--permission-mode', 'acceptEdits']);
+    assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'bypassPermissions' }).slice(-1), ['bypassPermissions']);
+    assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'default' }), ['claude', '--resume', 's1']);
+    assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'plan' }), ['claude', '--resume', 's1'], 'plan cannot work headlessly');
+    assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'weird; rm -rf' }), ['claude', '--resume', 's1']);
+    assert.deepEqual(resumeArgv(config, 's1', undefined), ['claude', '--resume', 's1']);
+    assert.deepEqual(resumeArgv({ ...config, inheritPermissionMode: false }, 's1', { permissionMode: 'auto' }), ['claude', '--resume', 's1']);
+    assert.deepEqual(
+      resumeArgv({ ...config, claudeCmd: ['claude', '--permission-mode', 'plan'] }, 's1', { permissionMode: 'auto' }),
+      ['claude', '--permission-mode', 'plan', '--resume', 's1'],
+    );
+  });
+});
+
+describe('original terminal warning', () => {
+  it('warns only for an active registry entry whose Claude is alive', () => {
+    const alive = (pid) => pid === 42;
+    assert.equal(originalStillRunning({ status: 'active', claudePid: 42 }, alive), true);
+    assert.equal(originalStillRunning({ status: 'active', claudePid: 7 }, alive), false);
+    assert.equal(originalStillRunning({ status: 'ended', claudePid: 42 }, alive), false);
+    assert.equal(originalStillRunning({ status: 'active' }, alive), false);
+    assert.equal(originalStillRunning(undefined, alive), false);
+    assert.equal(originalStillRunning({ status: 'active', claudePid: process.pid }), true);
+  });
+});
+
+describe('terminal fallback chain', () => {
+  it('skips a missing terminal binary and spawns the next candidate', async () => {
+    const pid = await openWithCandidates([['taskwake-no-such-terminal', ['-e', 'x']], [process.execPath, ['-e', '']]], tmpdir(), 200);
+    assert.ok(Number.isInteger(pid) && pid > 0);
+    await assert.rejects(openWithCandidates([['taskwake-no-such-terminal', []]], tmpdir(), 200), { code: 'ENOENT' });
+    const rejecting = [process.execPath, ['-e', 'process.exit(3)']];
+    assert.ok(await openWithCandidates([rejecting, [process.execPath, ['-e', '']]], tmpdir(), 400) > 0, 'a candidate that exits non-zero is skipped');
+    await assert.rejects(openWithCandidates([rejecting], tmpdir(), 400), /exited with code 3/);
+  });
+
+  it('prefers $TERMINAL and uses each emulator\'s own exec flag', () => {
+    const list = linuxTerminals(['claude', '--resume', 's'], { TERMINAL: 'foot' });
+    assert.deepEqual(list.map(([command]) => command), ['foot', 'x-terminal-emulator', 'gnome-terminal', 'konsole', 'xfce4-terminal', 'kitty', 'alacritty', 'xterm']);
+    assert.deepEqual(list[2], ['gnome-terminal', ['--', 'claude', '--resume', 's']]);
+    assert.equal(linuxTerminals(['claude'], {})[0][0], 'x-terminal-emulator');
+  });
+});
+
 describe('locale detection', () => {
   it('uses Chinese only for zh system locales', () => {
     assert.equal(isChineseLocale('zh-CN'), true);
     assert.equal(isChineseLocale('zh_TW'), true);
     assert.equal(isChineseLocale('en-US'), false);
     assert.equal(isChineseLocale('ja-JP'), false);
+  });
+
+  it('lets TASKWAKE_LANG override the system locale', () => {
+    assert.equal(useChinese({ TASKWAKE_LANG: 'zh' }, 'en-US'), true);
+    assert.equal(useChinese({ TASKWAKE_LANG: 'zh-CN' }, 'en-US'), true);
+    assert.equal(useChinese({ TASKWAKE_LANG: 'en' }, 'zh-CN'), false);
+    assert.equal(useChinese({ TASKWAKE_LANG: 'fr' }, 'zh-CN'), false);
+    assert.equal(useChinese({}, 'zh-CN'), true);
+    assert.equal(useChinese({}, 'en-US'), false);
   });
 });
 describe('dashboard localization', () => {
@@ -54,12 +134,13 @@ describe('failure classification', () => {
   it('classifies the whole real-banner corpus', async () => {
     const corpus = JSON.parse(await readFile(new URL('./fixtures/banners.json', import.meta.url), 'utf8'));
     const now = Date.parse('2030-01-15T00:00:00Z');
-    for (const { text, kind, weekly, parses } of corpus) {
+    for (const { text, kind, weekly, parses, now: at } of corpus) {
       assert.equal(failureKind(text), kind ?? undefined, text);
       assert.equal(isWeekly(text), Boolean(weekly), text);
       if (parses) {
-        // sentinel fallback: a parse failure returns exactly now + 999
-        assert.notEqual(resetEpoch(text, now, 999), now + 999, `should parse: ${text}`);
+        // sentinel fallback: a parse failure returns exactly now + 999; dated banners carry a nearby `now`
+        const base = at ? Date.parse(at) : now;
+        assert.notEqual(resetEpoch(text, base, 999), base + 999, `should parse: ${text}`);
       }
     }
   });
@@ -72,8 +153,23 @@ describe('reset scheduling', () => {
     assert.equal(resetEpoch('usage limit · resets in: 3 hours', 1_000), 10_801_000);
   });
 
+  it('parses the pipe-epoch and compact relative forms', () => {
+    const eve = 1_893_456_000_000 - 3_600_000;
+    assert.equal(resetEpoch('Claude AI usage limit reached|1893456000', eve), 1_893_456_000_000);
+    assert.equal(resetEpoch('Claude AI usage limit reached|1893456000123', eve), 1_893_456_000_123);
+    assert.equal(resetEpoch('Claude AI usage limit reached|1893456000', 1_900_000_000_000), 1_900_000_000_000, 'never in the past');
+    assert.ok(Number.isNaN(resetEpoch('Claude AI usage limit reached|18934560001', eve, Number.NaN)), '11-digit epochs are not a known form');
+    assert.ok(Number.isNaN(resetEpoch('Claude AI usage limit reached|1893456000', 0, Number.NaN)), 'more than 8 days out is untrusted');
+    assert.equal(resetEpoch('resets in 2h 30m', 1_000), 1_000 + 9_000_000);
+    assert.equal(resetEpoch('resets 2h30m', 1_000), 1_000 + 9_000_000);
+    assert.equal(resetEpoch('try again in 1 hr 5 min', 1_000), 1_000 + 3_900_000);
+    assert.equal(resetEpoch('usage limit · resets in 45m', 1_000), 1_000 + 2_700_000);
+    assert.equal(resetEpoch('wait 90 mins', 1_000), 1_000 + 5_400_000);
+    assert.ok(Number.isNaN(resetEpoch('resets in 5 months', 1_000, Number.NaN)), 'no unit prefix match');
+  });
+
   it('parses the dated form', () => {
-    const result = resetEpoch('try again at Jul 5th, 2030 4:09 PM UTC', 0);
+    const result = resetEpoch('try again at Jul 5th, 2030 4:09 PM UTC', Date.parse('2030-07-01T00:00:00Z'));
     assert.equal(result, Date.parse('Jul 5, 2030 4:09 PM UTC'));
   });
 
@@ -85,12 +181,16 @@ describe('reset scheduling', () => {
     );
   });
 
-  it('rolls a yearly reset forward and resolves ambiguous clock times', () => {
+  it('rolls a yearless reset forward only when it lands within 8 days, and resolves ambiguous clock times', () => {
     const now = Date.parse('2030-10-10T00:00:00Z');
+    assert.ok(Number.isNaN(resetEpoch('weekly limit; resets Oct 9, 10am UTC', now, Number.NaN)), 'stale date is untrusted');
+    assert.equal(resetEpoch('weekly limit; resets Oct 9, 10am UTC', now, 500), now + 500);
     assert.equal(
-      resetEpoch('weekly limit; resets Oct 9, 10am UTC', now),
-      Date.parse('2031-10-09T10:00:00Z'),
+      resetEpoch('weekly limit; resets Jan 2, 10am UTC', Date.parse('2030-12-30T00:00:00Z'), Number.NaN),
+      Date.parse('2031-01-02T10:00:00Z'),
     );
+    assert.equal(resetEpoch('resets Oct 15, 2030 10am UTC', now, Number.NaN), Date.parse('2030-10-15T10:00:00Z'), 'explicit year within the window kept');
+    assert.ok(Number.isNaN(resetEpoch('resets Oct 9, 2031 10am UTC', now, Number.NaN)), 'a year out is capped even with an explicit year');
     assert.equal(
       resetEpoch('usage limit resets 5 (UTC)', Date.parse('2030-01-01T04:00:00Z')),
       Date.parse('2030-01-01T05:00:00Z'),

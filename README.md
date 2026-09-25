@@ -11,8 +11,9 @@ It does not bypass quota. It waits for the published reset, then continues
 headlessly; this also requires Agent SDK credit (see Cost policy).
 
 TaskWake automatically uses Simplified Chinese when the operating system locale starts
-with `zh`; every other locale uses English. This applies to the dashboard, CLI,
-notifications, and autonomous continuation prompts.
+with `zh`; every other locale uses English. This applies to the CLI, notifications, and
+autonomous continuation prompts; set `TASKWAKE_LANG=zh` (or `TASKWAKE_LANG=en`) to override
+the system locale. The dashboard follows the browser language.
 
 ## Install
 
@@ -55,13 +56,29 @@ Troubleshooting:
    hook with the session id and error details.
 2. taskwake records the session under `~/.taskwake/pending/` and spawns one
    short-lived waiter process (no daemon).
-3. Usage waiters share one account-level gate. They probe at most once per hour
-   (with jitter) or at the parsed reset time, whichever comes first. Parse failures
-   fall back to the 5-hour window, then **probe**: `claude --resume <id> -p "Continue from
-   the interruption."` — if still limited, it re-parses and re-waits, bounded
-   by `maxAttempts`.
+3. The waiter fixes a **deadline** when it starts and moves it only on new provider
+   information. A reset time parsed from the banner is *trusted*: the waiter sleeps
+   until it (plus `marginMs`) and never probes earlier. Without a parsed time (or one
+   more than 8 days away, which is ignored) the deadline is the 5-hour `fallbackMs`
+   window, and the waiter may make *speculative* probes up to once per `usagePollMs`
+   (with jitter) before it. A **probe** is `claude --resume <id> -p "Continue from the
+   interruption."`. A speculative probe that is still limited never counts as a
+   failure; if its output names a reset time, that becomes the new trusted deadline.
+   Only failures at or after the deadline count towards `maxAttempts`; after each one
+   the waiter re-parses the output, or probes again one `usagePollMs` later. Usage
+   waiters share one account-level gate so several sessions never probe together.
+   Overload / server errors are eligible immediately and retry on the short
+   `overloadMs` backoff instead, giving up after `overloadMaxAttempts` failures.
+   A successful probe is recognised from Claude's JSON result (`is_error: false`),
+   even if the answer itself mentions a rate limit.
 4. At the real reset deadline, the default `hybrid` mode opens the same session in
    a new native terminal when a desktop is available. Otherwise it resumes headlessly.
+   On Linux the terminal is `$TERMINAL`, then the first installed of
+   `x-terminal-emulator`, `gnome-terminal`, `konsole`, `xfce4-terminal`, `kitty`,
+   `alacritty`, `xterm`. Resumes reuse the session's permission mode (see
+   Configuration). If the original Claude terminal is still running, TaskWake resumes
+   anyway but warns you to close it so two Claudes do not write one transcript.
+   A new `StopFailure` for a session whose waiter died re-arms that waiter.
 5. Multi-session aware: `SessionStart` registers each Claude session and also repairs
    orphaned waiters. `SessionEnd` marks clean exits. On Windows the optional Task Scheduler
    entry repairs pending work after boot and every 5 minutes without login.
@@ -82,7 +99,8 @@ node bin/taskwake.js dashboard
 taskwake dashboard
 ```
 
-It listens only on `127.0.0.1:4178`, opens the default browser, and refreshes every
+It listens only on `127.0.0.1:4178`, rejects requests whose `Host` header is not that
+loopback address (DNS-rebinding guard), opens the default browser, and refreshes every
 2 seconds. It merges active Claude sessions, pending limit waiters, running headless
 continuations, Ralph turns, recent transcript tools/messages, and the TaskWake log.
 Pass another port as the first argument or use `--no-open` to keep the browser closed.
@@ -108,13 +126,16 @@ the working tree.
 {
   "claudeCmd": ["claude", "--permission-mode", "auto"],
   "ralph": true,
-  "ralphMaxTurns": 20
+  "ralphMaxTurns": 8
 }
 ```
 
 Put this in `~/.taskwake.json`. Ralph continues in the same Claude session; it does not
 create a fresh chat. The loop stops when Claude emits `[RALPH_DONE]`, reaches
 `ralphMaxTurns`, or hits another limit; a later taskwake resumes the same bounded loop.
+Claude Code itself ends a turn after 8 consecutive `Stop`-hook continuations, so
+TaskWake clamps `ralphMaxTurns` to at most 8 (and logs once when it clamps); larger
+values cannot take effect within one user turn.
 It never instructs Claude to modify global Claude settings, deploy, publish, push, change
 credentials, spend money, mass-kill processes, or invent product scope. Claude's native
 `/goal` remains optional and works alongside the Ralph hook.
@@ -173,15 +194,37 @@ Optional config at `~/.taskwake.json`:
 | `usagePollMs`      | `3600000` (1 h, shared across sessions) |
 | `usageResumeSpacingMs` | `300000` (5 min between resumed sessions) |
 | `maxAttempts`      | `4`                                  |
+| `overloadMaxAttempts` | `8` (overload / server-error failures before giving up) |
 | `overloadMs`       | `[30000, 60000, 120000, 240000, 300000]` |
 | `maxContextResume` | `2000000` (bytes)                    |
 | `weeklyPolicy`     | `"notify"` (`"resume"` to auto-resume) |
 | `claudeCmd`        | `["claude"]`                         |
+| `inheritPermissionMode` | `true` (`false` to resume without `--permission-mode`) |
 | `ralph`            | `false`                                |
-| `ralphMaxTurns`    | `20`                                   |
+| `ralphMaxTurns`    | `20` (effective limit is at most 8, see Ralph mode) |
 | `notify`           | `"toast"` (`"none"` to disable)      |
 
-State lives in `~/.taskwake/` (flat JSON files; delete the directory to reset).
+Resumes inherit the interrupted session's permission mode. Headless `claude -p` denies
+every tool that needs permission unless a mode is given, so TaskWake adds
+`--permission-mode <mode>` from the session registry when the session ran in
+`acceptEdits`, `auto`, `dontAsk`, or `bypassPermissions` (not `plan`, which cannot make
+progress headlessly) and `claudeCmd` does not
+already set `--permission-mode`. This applies to visible terminals, headless probes, and
+the dashboard's **Open session**. A `bypassPermissions` session resumes with
+`bypassPermissions`. Set `"inheritPermissionMode": false` to opt out.
+
+Environment variable `TASKWAKE_LANG`: `zh` forces Simplified Chinese, any other value
+forces English (default: the operating system locale).
+
+State lives in `~/.taskwake/` (flat JSON files; delete the directory to reset). Finished
+outcomes in `done/` keep the newest 100 records and drop ones older than 30 days.
+
+## Roadmap / not yet
+
+- Boot recovery on macOS (launchd) and Linux (systemd); only Windows has it today.
+- Interactive Codex sessions; only `taskwake run codex exec …` batch work is covered.
+- Verifying the outcome of the visible-terminal path; TaskWake records `opened`, not
+  whether the reopened session actually continued.
 
 ## Acknowledgements
 

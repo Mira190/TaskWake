@@ -7,9 +7,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readdir, stat, unlink } from 'node:fs/promises';
 import { cleanId, resetEpoch } from './core.js';
 import { t } from './i18n.js';
-import { loadConfig, log, pendingDir, readJson, sessionsDir, writeAtomic } from './store.js';
+import { aliveProcess, loadConfig, log, pendingDir, readJson, sessionsDir, writeAtomic } from './store.js';
 
 const kinds = { rate_limit: 'usage', overloaded: 'overload', server_error: 'overload' };
+const RALPH_CAP = 8; // Claude Code ends the turn after 8 consecutive Stop-hook blocks
 const ralphFile = (session) => join(dirname(pendingDir), 'ralph', `${cleanId(session)}.json`);
 
 export async function saveEvent(input) {
@@ -18,7 +19,8 @@ export async function saveEvent(input) {
   const session = input?.session_id;
   if (!kind || !session) return undefined;
   const file = join(pendingDir, `${cleanId(session)}.json`);
-  if (await readJson(file)) return undefined; // a waiter is already pending for this session
+  const existing = await readJson(file);
+  if (existing && ownedByLiveProcess(existing)) return undefined; // a live waiter already owns this session
   const text = [input.error_details, input.last_assistant_message].filter(Boolean).join('\n');
   const parsedReset = kind === 'usage' ? resetEpoch(text, Date.now(), Number.NaN) : Number.NaN;
   let transcriptBytes = 0;
@@ -36,14 +38,23 @@ export async function saveEvent(input) {
     receivedAt: Date.now(),
     attempts: 0,
   };
+  if (existing) { // its waiter died: re-arm from the fresh event, keeping the counters and any older reset hint
+    Object.assign(record, { attempts: existing.attempts || 0, probes: existing.probes || 0 });
+    if (!record.resetParsed && existing.resetParsed) Object.assign(record, { resetHint: existing.resetHint, resetParsed: true, details: existing.details });
+    await writeAtomic(file, record);
+    startWaiter(session);
+    await log(`rearm session=${session}`);
+    return undefined;
+  }
   await writeAtomic(file, record);
   await log(`hook ${errorType} session=${session}`);
   return record;
 }
 
-export async function trackSession(input, ended = false, claudePid = process.ppid) {
+export async function trackSession(input, ended = false, claudePid = process.ppid, env = process.env) {
   const session = input?.session_id;
   if (!session) return undefined;
+  if (env.TASKWAKE_PROBE === session) return undefined; // our own headless probe: keep describing the interactive session
   const file = join(sessionsDir, `${cleanId(session)}.json`);
   const previous = await readJson(file);
   const record = {
@@ -66,14 +77,17 @@ export async function trackSession(input, ended = false, claudePid = process.ppi
 export function startWaiter(session) {
   const waiter = join(dirname(fileURLToPath(import.meta.url)), 'waiter.js');
   const child = spawn(process.execPath, [waiter, session], {
-    detached: true, stdio: 'ignore', env: process.env,
+    detached: true, stdio: 'ignore', env: process.env, windowsHide: true,
   });
   child.once('error', () => {});
   child.unref();
 }
 
-function aliveProcess(pid) {
-  try { process.kill(pid, 0); return true; } catch { return false; }
+// ponytail: pid-reuse can false-skip; the next event or reconcile retries.
+export function ownedByLiveProcess(state, now = Date.now()) {
+  if (state.waiterPid && aliveProcess(state.waiterPid)) return true;
+  if (state.probePid && aliveProcess(state.probePid)) return true; // parent died, but its Claude continuation is still working
+  return !state.waiterPid && now - state.receivedAt < 120_000; // fresh entry, its spawner is still claiming it
 }
 
 // Re-arm waiters orphaned by a reboot or logout. Runs from the SessionStart hook,
@@ -85,9 +99,7 @@ export async function reconcile() {
   for (const name of names) {
     const state = await readJson(join(pendingDir, name));
     if (!state?.session) continue;
-    if (state.waiterPid && aliveProcess(state.waiterPid)) continue; // ponytail: pid-reuse can false-skip; next reconcile retries
-    if (state.probePid && aliveProcess(state.probePid)) continue; // parent died, but its Claude continuation is still working
-    if (!state.waiterPid && Date.now() - state.receivedAt < 120_000) continue; // fresh entry, its spawner is still claiming it
+    if (ownedByLiveProcess(state)) continue;
     startWaiter(state.session);
     spawned++;
     await log(`reconcile respawned waiter session=${state.session}`);
@@ -103,8 +115,10 @@ export async function ralph(input, config) {
   const file = ralphFile(session);
   const previous = await readJson(file);
   const turns = (previous?.turns || 0) + 1;
+  const limit = Math.min(config.ralphMaxTurns, RALPH_CAP);
+  if (turns === 1 && config.ralphMaxTurns > RALPH_CAP) await log(`ralph ralphMaxTurns=${config.ralphMaxTurns} clamped to ${RALPH_CAP} session=${session}`);
   const done = /\[RALPH_DONE\]/i.test(input.last_assistant_message || '');
-  if (done || turns >= config.ralphMaxTurns) {
+  if (done || turns >= limit) {
     await unlink(file).catch(() => {});
     await log(`ralph stopped session=${session} reason=${done ? 'done' : 'max-turns'} turns=${turns}`);
     return undefined;
@@ -114,8 +128,8 @@ export async function ralph(input, config) {
   return {
     decision: 'block',
     reason: t(
-      `Ralph loop turn ${turns}/${config.ralphMaxTurns}: continue autonomously. Finish and verify the current task. If complete, inspect TODO.md, REVIEW_AND_HANDOFF.md, GAME_DESIGN.md, tests, and the working tree; execute the highest-priority safe local task already implied by them. Make reversible project-local choices without asking. Do not invent scope, modify global Claude settings, deploy, publish, push, change credentials, spend money, or terminate processes you did not start. Never mass-kill by process name. When no safe local task remains, end with [RALPH_DONE].`,
-      `Ralph 循环 ${turns}/${config.ralphMaxTurns}：自主继续。完成并验证当前任务；如果已经完成，请检查 TODO.md、REVIEW_AND_HANDOFF.md、GAME_DESIGN.md、测试和工作树，执行其中已明确的最高优先级安全本地任务。对可逆的项目内选择自行决定，无需询问。不得擅自扩大范围、修改 Claude 全局设置、部署、发布、推送、修改凭据、花费资金或终止本轮未启动的进程；不得按进程名批量终止。没有安全本地任务时以 [RALPH_DONE] 结束。`,
+      `Ralph loop turn ${turns}/${limit}: continue autonomously. Finish and verify the current task. If complete, inspect TODO.md, REVIEW_AND_HANDOFF.md, GAME_DESIGN.md, tests, and the working tree; execute the highest-priority safe local task already implied by them. Make reversible project-local choices without asking. Do not invent scope, modify global Claude settings, deploy, publish, push, change credentials, spend money, or terminate processes you did not start. Never mass-kill by process name. When no safe local task remains, end with [RALPH_DONE].`,
+      `Ralph 循环 ${turns}/${limit}：自主继续。完成并验证当前任务；如果已经完成，请检查 TODO.md、REVIEW_AND_HANDOFF.md、GAME_DESIGN.md、测试和工作树，执行其中已明确的最高优先级安全本地任务。对可逆的项目内选择自行决定，无需询问。不得擅自扩大范围、修改 Claude 全局设置、部署、发布、推送、修改凭据、花费资金或终止本轮未启动的进程；不得按进程名批量终止。没有安全本地任务时以 [RALPH_DONE] 结束。`,
     ),
   };
 }

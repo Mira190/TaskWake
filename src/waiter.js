@@ -79,6 +79,28 @@ function nextUsageCheck(deadline, config, now = Date.now()) {
   return Math.max(now, Math.min(deadline, now + jitter(config.usagePollMs, 0.08)));
 }
 
+// Trust Claude's JSON envelope over regexes: a successful answer may mention "rate limit".
+export function evaluateProbe({ code, stdout = '', stderr = '' }) {
+  const trimmed = stdout.trim();
+  let envelope;
+  try { envelope = JSON.parse(trimmed); } catch {
+    for (const line of trimmed.split(/\r?\n/).reverse()) {
+      try {
+        const row = JSON.parse(line);
+        if (row?.type === 'result') { envelope = row; break; }
+      } catch { /* not JSON */ }
+    }
+  }
+  if (typeof envelope?.is_error === 'boolean') {
+    if (!envelope.is_error) return { ok: true, kind: undefined, text: '' };
+    const text = `${envelope.result ?? envelope.subtype ?? ''}\n${stderr}`;
+    return { ok: false, kind: failureKind(text), text };
+  }
+  const text = `${stdout}\n${stderr}`;
+  const kind = failureKind(text);
+  return { ok: code === 0 && !kind, kind, text };
+}
+
 export async function shouldOpenTerminal(kind, mode, deadline, now = Date.now(), env = process.env, platform = process.platform, probe, oversized = false) {
   return (kind === 'usage' || (kind === 'overload' && oversized)) && mode !== 'headless' && now >= deadline
     && await canShowTerminal(env, platform, probe);
@@ -162,9 +184,8 @@ export async function wait(session, config) {
         },
       },
     );
-    const combined = `${result.stdout}\n${result.stderr}`;
-    const kind = failureKind(combined);
-    if (result.code === 0 && !kind) {
+    const { ok, kind, text: combined } = evaluateProbe(result);
+    if (ok) {
       if (wasUsage) await setUsageGate(session, Date.now() + config.usageResumeSpacingMs, 'resumed');
       notify('TaskWake', t(`Session resumed. Reopen: claude --resume ${session}`, `会话已续跑。重新打开：claude --resume ${session}`), config);
       return finish('resumed', { attempts: state.probes });

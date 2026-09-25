@@ -8,7 +8,7 @@ import {
 import { dashboardPage } from '../src/dashboard-page.js';
 import { isChineseLocale } from '../src/i18n.js';
 import { canShowTerminal } from '../src/store.js';
-import { shouldOpenTerminal } from '../src/waiter.js';
+import { evaluateProbe, shouldOpenTerminal } from '../src/waiter.js';
 
 describe('visible resume policy', () => {
   it('opens only after the deadline on an interactive desktop', async () => {
@@ -25,6 +25,29 @@ describe('visible resume policy', () => {
     assert.equal(await canShowTerminal({}, 'win32', async () => { throw new Error('blocked'); }), false);
     assert.equal(await canShowTerminal({ DISPLAY: ':0' }, 'linux'), true);
     assert.equal(await canShowTerminal({}, 'linux'), false);
+  });
+});
+
+describe('headless probe evaluation', () => {
+  it('trusts the JSON result envelope over banner regexes', () => {
+    const success = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'Fixed the rate limit reset bug; try again in 5 minutes.' });
+    assert.deepEqual(evaluateProbe({ code: 0, stdout: success, stderr: '' }), { ok: true, kind: undefined, text: '' });
+    const limited = JSON.stringify({ type: 'result', is_error: true, result: "You've hit your session limit · resets 3pm" });
+    const failed = evaluateProbe({ code: 1, stdout: limited, stderr: '' });
+    assert.equal(failed.ok, false);
+    assert.equal(failed.kind, 'usage');
+    assert.match(failed.text, /session limit/);
+  });
+
+  it('reads the last result line of JSONL and falls back to plain text', () => {
+    const jsonl = [JSON.stringify({ type: 'system' }), JSON.stringify({ type: 'result', is_error: false, result: 'usage limit' })].join('\n');
+    assert.equal(evaluateProbe({ code: 0, stdout: jsonl, stderr: '' }).ok, true);
+    assert.deepEqual(
+      { ...evaluateProbe({ code: 1, stdout: "You've hit your session limit", stderr: '' }), text: undefined },
+      { ok: false, kind: 'usage', text: undefined },
+    );
+    assert.equal(evaluateProbe({ code: 0, stdout: 'done', stderr: '' }).ok, true);
+    assert.equal(evaluateProbe({ code: 2, stdout: JSON.stringify({ is_error: true, subtype: 'error_during_execution' }), stderr: '' }).kind, undefined);
   });
 });
 

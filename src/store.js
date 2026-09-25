@@ -63,11 +63,22 @@ export async function readJson(path) {
 }
 
 let writes = 0;
+const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+// Windows refuses to replace a file another rename or reader holds (EPERM/EBUSY), so retry briefly.
 export async function writeAtomic(path, value) {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.${writes++}.${Math.random().toString(36).slice(2)}`;
   await writeFile(temporary, JSON.stringify(value, null, 1));
-  await rename(temporary, path);
+  for (let attempt = 0; ; attempt++) {
+    try { await rename(temporary, path); return; }
+    catch (error) {
+      if (!['EPERM', 'EBUSY', 'EACCES'].includes(error.code) || attempt >= 10) {
+        await unlink(temporary).catch(() => {});
+        throw error;
+      }
+      await pause(5 * (attempt + 1));
+    }
+  }
 }
 
 // Keep the newest `keep` outcomes and drop anything older than `maxAgeMs`.

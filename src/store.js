@@ -50,9 +50,10 @@ export async function readJson(path) {
   try { return JSON.parse(await readFile(path, 'utf8')); } catch { return undefined; }
 }
 
+let writes = 0;
 export async function writeAtomic(path, value) {
   await mkdir(dirname(path), { recursive: true });
-  const temporary = `${path}.${process.pid}`;
+  const temporary = `${path}.${process.pid}.${writes++}.${Math.random().toString(36).slice(2)}`;
   await writeFile(temporary, JSON.stringify(value, null, 1));
   await rename(temporary, path);
 }

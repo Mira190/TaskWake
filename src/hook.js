@@ -18,7 +18,14 @@ export async function saveEvent(input) {
   const session = input?.session_id;
   if (!kind || !session) return undefined;
   const file = join(pendingDir, `${cleanId(session)}.json`);
-  if (await readJson(file)) return undefined; // a waiter is already pending for this session
+  const existing = await readJson(file);
+  if (existing) { // a waiter is already pending for this session; re-arm it if its owner died
+    if (!ownedByLiveProcess(existing)) {
+      startWaiter(session);
+      await log(`rearm session=${session}`);
+    }
+    return undefined;
+  }
   const text = [input.error_details, input.last_assistant_message].filter(Boolean).join('\n');
   const parsedReset = kind === 'usage' ? resetEpoch(text, Date.now(), Number.NaN) : Number.NaN;
   let transcriptBytes = 0;
@@ -66,7 +73,7 @@ export async function trackSession(input, ended = false, claudePid = process.ppi
 export function startWaiter(session) {
   const waiter = join(dirname(fileURLToPath(import.meta.url)), 'waiter.js');
   const child = spawn(process.execPath, [waiter, session], {
-    detached: true, stdio: 'ignore', env: process.env,
+    detached: true, stdio: 'ignore', env: process.env, windowsHide: true,
   });
   child.once('error', () => {});
   child.unref();
@@ -74,6 +81,13 @@ export function startWaiter(session) {
 
 function aliveProcess(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+// ponytail: pid-reuse can false-skip; the next event or reconcile retries.
+export function ownedByLiveProcess(state, now = Date.now()) {
+  if (state.waiterPid && aliveProcess(state.waiterPid)) return true;
+  if (state.probePid && aliveProcess(state.probePid)) return true; // parent died, but its Claude continuation is still working
+  return !state.waiterPid && now - state.receivedAt < 120_000; // fresh entry, its spawner is still claiming it
 }
 
 // Re-arm waiters orphaned by a reboot or logout. Runs from the SessionStart hook,
@@ -85,9 +99,7 @@ export async function reconcile() {
   for (const name of names) {
     const state = await readJson(join(pendingDir, name));
     if (!state?.session) continue;
-    if (state.waiterPid && aliveProcess(state.waiterPid)) continue; // ponytail: pid-reuse can false-skip; next reconcile retries
-    if (state.probePid && aliveProcess(state.probePid)) continue; // parent died, but its Claude continuation is still working
-    if (!state.waiterPid && Date.now() - state.receivedAt < 120_000) continue; // fresh entry, its spawner is still claiming it
+    if (ownedByLiveProcess(state)) continue;
     startWaiter(state.session);
     spawned++;
     await log(`reconcile respawned waiter session=${state.session}`);

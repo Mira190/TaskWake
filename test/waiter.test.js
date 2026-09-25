@@ -109,6 +109,32 @@ describe('hook subprocess end to end', () => {
   });
 });
 
+describe('hook re-arm', () => {
+  it('re-arms a pending record whose waiter died when the same session fails again', async () => {
+    const deadPid = await new Promise((resolve) => {
+      const child = spawn(process.execPath, ['-e', '']);
+      child.once('exit', () => resolve(child.pid));
+    });
+    await writeAtomic(join(pendingDir, 'rearm-1.json'), {
+      session: 'rearm-1', kind: 'usage', errorType: 'rate_limit', details: 'session limit', transcriptBytes: 0,
+      resetHint: Date.now(), receivedAt: Date.now() - 300_000, waiterPid: deadPid,
+    });
+    assert.equal(await saveEvent({ session_id: 'rearm-1', error: 'rate_limit' }), undefined, 'no new record');
+    let done;
+    for (let tick = 0; tick < 100 && !done; tick++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      done = await readJson(join(doneDir, 'rearm-1.json'));
+    }
+    assert.equal(done?.status, 'resumed');
+  });
+
+  it('writes atomically even when one process overlaps writes to the same file', async () => {
+    const target = join(tmp, 'overlap.json');
+    await Promise.all(Array.from({ length: 20 }, (_, index) => writeAtomic(target, { index })));
+    assert.equal(typeof (await readJson(target)).index, 'number');
+  });
+});
+
 describe('reconcile after reboot', () => {
   it('respawns only orphaned waiters', async () => {
     const deadPid = await new Promise((resolve) => {

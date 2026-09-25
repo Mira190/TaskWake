@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { cleanId, pathsOverlap } from './core.js';
 import { t } from './i18n.js';
-import { home, pendingDir, doneDir, sessionsDir, loadConfig, log, openTerminal, readJson, resumeArgv, tailLog } from './store.js';
+import { aliveProcess as alive, home, pendingDir, doneDir, sessionsDir, loadConfig, log, openTerminal, readJson, resumeArgv, tailLog } from './store.js';
 import { dashboardPage } from './dashboard-page.js';
 
 const ralphDir = join(home, 'ralph');
@@ -17,11 +17,6 @@ async function listJson(dir) {
     const names = (await readdir(dir)).filter((name) => name.endsWith('.json'));
     return (await Promise.all(names.map((name) => readJson(join(dir, name))))).filter(Boolean);
   } catch { return []; }
-}
-
-function alive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 const compact = (value, max = 360) => String(value || '').replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -261,7 +256,7 @@ export async function startDashboard({ port = 4178, open = true } = {}) {
     server.listen(port, '127.0.0.1', resolve);
   });
   const bound = server.address().port;
-  allowedHosts = new Set([`127.0.0.1:${bound}`, `localhost:${bound}`, `[::1]:${bound}`]);
+  allowedHosts = new Set(['127.0.0.1', 'localhost', '[::1]'].flatMap((host) => [host, `${host}:${bound}`])); // browsers omit :80
   const url = `http://127.0.0.1:${bound}`;
   dashboardOrigin = url;
   process.stdout.write(t(`TaskWake dashboard: ${url}\n`, `TaskWake 控制台：${url}\n`));

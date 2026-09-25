@@ -121,7 +121,9 @@ describe('hook re-arm', () => {
       session: 'rearm-1', kind: 'usage', errorType: 'rate_limit', details: 'session limit', transcriptBytes: 0,
       resetHint: Date.now(), receivedAt: Date.now() - 300_000, waiterPid: deadPid,
     });
-    assert.equal(await saveEvent({ session_id: 'rearm-1', error: 'rate_limit' }), undefined, 'no new record');
+    assert.equal(await saveEvent({ session_id: 'rearm-1', error: 'rate_limit', error_details: 'resets in 1 seconds' }), undefined, 'no new record');
+    const rearmed = await readJson(join(pendingDir, 'rearm-1.json'));
+    assert.equal(rearmed?.resetParsed, true, 'fresh event details replace the stale record');
     let done;
     for (let tick = 0; tick < 100 && !done; tick++) {
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -212,9 +214,16 @@ describe('multi-session tracking and dashboard', () => {
       assert.equal(await get(`evil.example:${port}`), 403);
       assert.equal(await get(`127.0.0.1:${port}`), 200);
       assert.equal(await get(`localhost:${port}`), 200);
+      assert.equal(await get('127.0.0.1'), 200, 'port-less Host as browsers send for :80');
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
+  });
+
+  it('ignores hooks fired by TaskWake\'s own headless probe', async () => {
+    assert.equal(await trackSession({ session_id: 'probe-self', cwd: tmp }, false, process.pid, { TASKWAKE_PROBE: 'probe-self' }), undefined);
+    assert.equal(await readJson(join(sessionsDir, 'probe-self.json')), undefined, 'registry untouched');
+    assert.ok(await trackSession({ session_id: 'probe-other', cwd: tmp }, false, process.pid, { TASKWAKE_PROBE: 'probe-self' }), 'other sessions still tracked');
   });
 
   it('tracks lifecycle, transcript activity, and same-directory conflicts', async () => {

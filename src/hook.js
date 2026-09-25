@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readdir, stat, unlink } from 'node:fs/promises';
 import { cleanId, resetEpoch } from './core.js';
 import { t } from './i18n.js';
-import { loadConfig, log, pendingDir, readJson, sessionsDir, writeAtomic } from './store.js';
+import { aliveProcess, loadConfig, log, pendingDir, readJson, sessionsDir, writeAtomic } from './store.js';
 
 const kinds = { rate_limit: 'usage', overloaded: 'overload', server_error: 'overload' };
 const RALPH_CAP = 8; // Claude Code ends the turn after 8 consecutive Stop-hook blocks
@@ -20,13 +20,7 @@ export async function saveEvent(input) {
   if (!kind || !session) return undefined;
   const file = join(pendingDir, `${cleanId(session)}.json`);
   const existing = await readJson(file);
-  if (existing) { // a waiter is already pending for this session; re-arm it if its owner died
-    if (!ownedByLiveProcess(existing)) {
-      startWaiter(session);
-      await log(`rearm session=${session}`);
-    }
-    return undefined;
-  }
+  if (existing && ownedByLiveProcess(existing)) return undefined; // a live waiter already owns this session
   const text = [input.error_details, input.last_assistant_message].filter(Boolean).join('\n');
   const parsedReset = kind === 'usage' ? resetEpoch(text, Date.now(), Number.NaN) : Number.NaN;
   let transcriptBytes = 0;
@@ -44,14 +38,23 @@ export async function saveEvent(input) {
     receivedAt: Date.now(),
     attempts: 0,
   };
+  if (existing) { // its waiter died: re-arm from the fresh event, keeping the counters and any older reset hint
+    Object.assign(record, { attempts: existing.attempts || 0, probes: existing.probes || 0 });
+    if (!record.resetParsed && existing.resetParsed) Object.assign(record, { resetHint: existing.resetHint, resetParsed: true, details: existing.details });
+    await writeAtomic(file, record);
+    startWaiter(session);
+    await log(`rearm session=${session}`);
+    return undefined;
+  }
   await writeAtomic(file, record);
   await log(`hook ${errorType} session=${session}`);
   return record;
 }
 
-export async function trackSession(input, ended = false, claudePid = process.ppid) {
+export async function trackSession(input, ended = false, claudePid = process.ppid, env = process.env) {
   const session = input?.session_id;
   if (!session) return undefined;
+  if (env.TASKWAKE_PROBE === session) return undefined; // our own headless probe: keep describing the interactive session
   const file = join(sessionsDir, `${cleanId(session)}.json`);
   const previous = await readJson(file);
   const record = {
@@ -78,10 +81,6 @@ export function startWaiter(session) {
   });
   child.once('error', () => {});
   child.unref();
-}
-
-function aliveProcess(pid) {
-  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 // ponytail: pid-reuse can false-skip; the next event or reconcile retries.

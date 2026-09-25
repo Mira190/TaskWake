@@ -50,7 +50,8 @@ export async function loadConfig() {
 
 // Headless `claude -p` denies every tool needing permission unless a mode is given,
 // so resume with the mode the interactive session was registered with.
-const inheritedModes = new Set(['acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions']);
+// `plan` is left out: a headless plan-mode turn cannot leave planning, so it would "succeed" without working.
+const inheritedModes = new Set(['acceptEdits', 'auto', 'dontAsk', 'bypassPermissions']);
 export function resumeArgv(config, session, registry) {
   const mode = registry?.permissionMode;
   const explicit = config.claudeCmd.some((arg) => arg === '--permission-mode' || arg.startsWith('--permission-mode='));
@@ -62,8 +63,14 @@ export async function readJson(path) {
   try { return JSON.parse(await readFile(path, 'utf8')); } catch { return undefined; }
 }
 
+export const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+export function aliveProcess(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
 let writes = 0;
-const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 // Windows refuses to replace a file another rename or reader holds (EPERM/EBUSY), so retry briefly.
 export async function writeAtomic(path, value) {
   await mkdir(dirname(path), { recursive: true });
@@ -143,15 +150,26 @@ export async function canShowTerminal(env = process.env, platform = process.plat
 
 const shellQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 
-// Spawn the first candidate that exists; a missing binary (ENOENT) falls through to the next.
-export function openWithCandidates(candidates, cwd = homedir()) {
+// Spawn the first candidate that works: a missing binary (ENOENT) or one that exits non-zero
+// within the grace period (an emulator rejecting its arguments) falls through to the next.
+export function openWithCandidates(candidates, cwd = homedir(), graceMs = 1_000) {
   return new Promise((resolve, reject) => {
     const attempt = (index, lastError) => {
       if (index >= candidates.length) { reject(lastError || new Error('No terminal candidates')); return; }
       const [command, args] = candidates[index];
       const child = spawn(command, args, { cwd, detached: true, stdio: 'ignore', windowsHide: false });
-      child.once('spawn', () => { child.unref(); resolve(child.pid); });
-      child.once('error', (error) => (error.code === 'ENOENT' ? attempt(index + 1, error) : reject(error)));
+      let settled = false;
+      const settle = (action) => { if (!settled) { settled = true; action(); } };
+      child.once('error', (error) => settle(() => (error.code === 'ENOENT' ? attempt(index + 1, error) : reject(error))));
+      child.once('spawn', () => {
+        child.unref();
+        const timer = setTimeout(() => settle(() => resolve(child.pid)), graceMs); // kept referenced so the caller's loop waits
+        child.once('exit', (code) => {
+          if (!code) return; // gnome-terminal hands off to its server and exits 0 at once
+          clearTimeout(timer);
+          settle(() => attempt(index + 1, new Error(`${command} exited with code ${code}`)));
+        });
+      });
     };
     attempt(0);
   });

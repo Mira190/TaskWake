@@ -81,13 +81,20 @@ function clockEpoch(hour, minute, zone, now) {
 }
 
 const unit = '(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?![a-z])';
-const relativeForm = new RegExp(`(?:try again|reset\\w*|wait|\\bin)(?:\\s+(?:at|in))?\\s*:?\\s*(\\d+(?:\\.\\d+)?)\\s*${unit}(?:\\s*(\\d+)\\s*${unit})?`, 'i');
+const relativeForm = new RegExp(`(?:try again|reset\\w*|wait)(?:\\s+(?:at|in))?\\s*:?\\s*(\\d+(?:\\.\\d+)?)\\s*${unit}(?:\\s*(\\d+)\\s*${unit})?`, 'i');
 const unitMs = (name) => (/^h/i.test(name) ? HOUR : /^m/i.test(name) ? 60_000 : 1_000);
 
 // ponytail: parsed times are hints, not truth — the waiter verifies by probing,
 // so a wrong parse costs one bounded extra wait, never a lost night.
+// Anything more than 8 days out is treated as a parse failure: no provider window is that long.
+export const MAX_RESET_AHEAD_MS = 8 * 24 * HOUR;
 export function resetEpoch(message = '', now = Date.now(), fallbackMs = defaults.fallbackMs) {
-  const piped = message.match(/limit reached\|(\d{10,13})/i);
+  const epoch = parseReset(message, now);
+  return Number.isFinite(epoch) && epoch - now <= MAX_RESET_AHEAD_MS ? epoch : now + fallbackMs;
+}
+
+function parseReset(message, now) {
+  const piped = message.match(/limit reached\|(?<!\d)(\d{10}|\d{13})(?!\d)/i);
   if (piped) return Math.max(now, Number(piped[1]) * (piped[1].length === 13 ? 1 : 1_000));
 
   const relative = message.match(relativeForm);
@@ -105,7 +112,6 @@ export function resetEpoch(message = '', now = Date.now(), fallbackMs = defaults
       year++;
       epoch = parse();
     }
-    if (!dated[3] && epoch - now > 8 * 24 * HOUR) return now + fallbackMs; // stale yearless date: untrusted
     if (Number.isFinite(epoch)) return Math.max(now, epoch);
   }
 
@@ -123,7 +129,7 @@ export function resetEpoch(message = '', now = Date.now(), fallbackMs = defaults
       try { return clockEpoch(hour, minute, clock[4], now); } catch { /* invalid zone */ }
     }
   }
-  return now + fallbackMs;
+  return Number.NaN;
 }
 
 export function codexExecIndex(args) {

@@ -207,7 +207,8 @@ Optional config at `~/.taskwake.json`:
 Resumes inherit the interrupted session's permission mode. Headless `claude -p` denies
 every tool that needs permission unless a mode is given, so TaskWake adds
 `--permission-mode <mode>` from the session registry when the session ran in
-`acceptEdits`, `plan`, `auto`, `dontAsk`, or `bypassPermissions` and `claudeCmd` does not
+`acceptEdits`, `auto`, `dontAsk`, or `bypassPermissions` (not `plan`, which cannot make
+progress headlessly) and `claudeCmd` does not
 already set `--permission-mode`. This applies to visible terminals, headless probes, and
 the dashboard's **Open session**. A `bypassPermissions` session resumes with
 `bypassPermissions`. Set `"inheritPermissionMode": false` to opt out.

@@ -12,17 +12,26 @@ Waiter correctness
   otherwise it is skipped at once. New `overloadMaxAttempts` (default 8).
 - Headless probes are judged from Claude's JSON result envelope (`is_error`), so a
   successful answer that mentions "rate limit" is no longer treated as still limited.
-- Resumes inherit the session's permission mode (`inheritPermissionMode`, default `true`).
+- Resumes inherit the session's permission mode (`inheritPermissionMode`, default `true`;
+  `plan` is not inherited because a headless plan-mode turn cannot do work).
+- Headless probes run with `TASKWAKE_PROBE=<session>` so their own SessionStart/SessionEnd
+  hooks do not overwrite the interactive session's registry entry.
+- An overload that turns out to be a usage limit with an announced reset starts a fresh
+  usage attempt budget instead of giving up on the overload count.
 - A resume warns when the original Claude terminal is still running.
-- A new `StopFailure` for a session whose waiter died re-arms the waiter.
+- A new `StopFailure` for a session whose waiter died re-arms the waiter from the fresh
+  event's details, keeping the old counters.
+- `writeAtomic` retries the final rename on Windows `EPERM`/`EBUSY`.
 
 Parsing
 - New reset forms: `usage limit reached|<epoch>`, `2h 30m`, `2h30m`, `1 hr 5 min`,
-  `45m`, `90 mins`. A yearless date that would land more than 8 days ahead is untrusted.
+  `45m`, `90 mins`. Any parsed time more than 8 days ahead is treated as unparsed
+  (this applies to every caller, including the Codex path).
 
 Platform and dashboard
 - Linux terminal fallback chain (`$TERMINAL`, x-terminal-emulator, gnome-terminal,
-  konsole, xfce4-terminal, kitty, alacritty, xterm).
+  konsole, xfce4-terminal, kitty, alacritty, xterm); a candidate that exits non-zero
+  right away falls through to the next one.
 - Dashboard rejects non-loopback `Host` headers, reads transcript activity only for the
   30 sessions shown, and caches the `~/.claude/projects` listing for 60 s.
 - `done/` is pruned to the newest 100 records and 30 days.

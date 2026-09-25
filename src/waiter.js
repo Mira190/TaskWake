@@ -4,15 +4,14 @@
 import { mkdir, open, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { cleanId, failureKind, isWeekly, resetEpoch } from './core.js';
+import { MAX_RESET_AHEAD_MS, cleanId, failureKind, isWeekly, resetEpoch } from './core.js';
 import { t } from './i18n.js';
-import { canShowTerminal, doneDir, home, loadConfig, log, notify, openTerminal, pendingDir, pruneDone, readJson, resumeArgv, runCommand, sessionsDir, writeAtomic } from './store.js';
+import { aliveProcess, canShowTerminal, doneDir, home, loadConfig, log, notify, openTerminal, pause, pendingDir, pruneDone, readJson, resumeArgv, runCommand, sessionsDir, writeAtomic } from './store.js';
 
 const CHUNK = 60_000; // local cancellation/clock check; this never calls Claude
 const GATE_STALE_MS = 2 * 60_000;
 const gateFile = join(home, 'usage-gate.json');
 const gateLock = `${gateFile}.lock`;
-const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const jitter = (base, spread = 0.15) => Math.round(base * (1 - spread + Math.random() * spread * 2));
 
 async function editGate(change, retry = true) {
@@ -58,8 +57,7 @@ async function setUsageGate(session, nextProbeAt, result) {
   }));
 }
 
-const MAX_AHEAD_MS = 8 * 24 * 3_600_000;
-const capped = (epoch, now) => (epoch - now > MAX_AHEAD_MS ? Number.NaN : epoch);
+const capped = (epoch, now) => (epoch - now > MAX_RESET_AHEAD_MS ? Number.NaN : epoch);
 
 // The deadline moves only on new provider information; see README "How it works".
 export function initialDeadline(state, config) {
@@ -101,7 +99,6 @@ export function evaluateProbe({ code, stdout = '', stderr = '' }) {
   return { ok: code === 0 && !kind, kind, text };
 }
 
-const aliveProcess = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 export function originalStillRunning(registry, isAlive = aliveProcess) {
   return registry?.status === 'active' && Number.isInteger(registry.claudePid) && registry.claudePid > 0 && isAlive(registry.claudePid);
 }
@@ -188,7 +185,6 @@ export async function wait(session, config) {
       return finish('skipped-context');
     }
 
-    const warning = await originalWarning();
     state.probes++;
     const started = Date.now();
     await log(`probe session=${session} probe=${state.probes} failures=${state.attempts}`);
@@ -196,6 +192,7 @@ export async function wait(session, config) {
       [...resumeArgv(config, session, registry), '-p', config.retryText, '--output-format', 'json'],
       {
         ...(state.cwd ? { cwd: state.cwd } : {}),
+        env: { ...process.env, TASKWAKE_PROBE: session }, // lets the probe's own hooks recognise themselves
         onSpawn: (pid) => {
           state.probePid = pid;
           writeAtomic(file, state).catch(() => {});
@@ -204,6 +201,7 @@ export async function wait(session, config) {
     );
     const { ok, kind, text: combined } = evaluateProbe(result);
     if (ok) {
+      const warning = await originalWarning();
       if (wasUsage) await setUsageGate(session, Date.now() + config.usageResumeSpacingMs, 'resumed');
       notify('TaskWake', t(`Session resumed. Reopen: claude --resume ${session}`, `会话已续跑。重新打开：claude --resume ${session}`) + warning, config);
       return finish('resumed', { attempts: state.probes });
@@ -212,9 +210,8 @@ export async function wait(session, config) {
     const now = Date.now();
     if (kind === 'usage') {
       state.kind = 'usage';
-      const raw = resetEpoch(combined, now, Number.NaN);
-      const parsed = capped(raw, now);
-      if (Number.isFinite(raw) && !Number.isFinite(parsed)) await log(`reset hint ignored (too far) session=${session}`);
+      const parsed = resetEpoch(combined, now, Number.NaN); // already capped at 8 days
+      if (!wasUsage && Number.isFinite(parsed)) state.attempts = 0; // an announced usage window starts a fresh usage budget
       if (started < deadline) { // speculative: the provider window had not reset yet
         if (Number.isFinite(parsed)) {
           deadline = parsed + config.marginMs;

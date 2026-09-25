@@ -58,6 +58,7 @@ describe('permission mode inheritance', () => {
     assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'acceptEdits' }), ['claude', '--resume', 's1', '--permission-mode', 'acceptEdits']);
     assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'bypassPermissions' }).slice(-1), ['bypassPermissions']);
     assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'default' }), ['claude', '--resume', 's1']);
+    assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'plan' }), ['claude', '--resume', 's1'], 'plan cannot work headlessly');
     assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'weird; rm -rf' }), ['claude', '--resume', 's1']);
     assert.deepEqual(resumeArgv(config, 's1', undefined), ['claude', '--resume', 's1']);
     assert.deepEqual(resumeArgv({ ...config, inheritPermissionMode: false }, 's1', { permissionMode: 'auto' }), ['claude', '--resume', 's1']);
@@ -82,9 +83,12 @@ describe('original terminal warning', () => {
 
 describe('terminal fallback chain', () => {
   it('skips a missing terminal binary and spawns the next candidate', async () => {
-    const pid = await openWithCandidates([['taskwake-no-such-terminal', ['-e', 'x']], [process.execPath, ['-e', '']]], tmpdir());
+    const pid = await openWithCandidates([['taskwake-no-such-terminal', ['-e', 'x']], [process.execPath, ['-e', '']]], tmpdir(), 200);
     assert.ok(Number.isInteger(pid) && pid > 0);
-    await assert.rejects(openWithCandidates([['taskwake-no-such-terminal', []]], tmpdir()), { code: 'ENOENT' });
+    await assert.rejects(openWithCandidates([['taskwake-no-such-terminal', []]], tmpdir(), 200), { code: 'ENOENT' });
+    const rejecting = [process.execPath, ['-e', 'process.exit(3)']];
+    assert.ok(await openWithCandidates([rejecting, [process.execPath, ['-e', '']]], tmpdir(), 400) > 0, 'a candidate that exits non-zero is skipped');
+    await assert.rejects(openWithCandidates([rejecting], tmpdir(), 400), /exited with code 3/);
   });
 
   it('prefers $TERMINAL and uses each emulator\'s own exec flag', () => {
@@ -130,12 +134,13 @@ describe('failure classification', () => {
   it('classifies the whole real-banner corpus', async () => {
     const corpus = JSON.parse(await readFile(new URL('./fixtures/banners.json', import.meta.url), 'utf8'));
     const now = Date.parse('2030-01-15T00:00:00Z');
-    for (const { text, kind, weekly, parses } of corpus) {
+    for (const { text, kind, weekly, parses, now: at } of corpus) {
       assert.equal(failureKind(text), kind ?? undefined, text);
       assert.equal(isWeekly(text), Boolean(weekly), text);
       if (parses) {
-        // sentinel fallback: a parse failure returns exactly now + 999
-        assert.notEqual(resetEpoch(text, now, 999), now + 999, `should parse: ${text}`);
+        // sentinel fallback: a parse failure returns exactly now + 999; dated banners carry a nearby `now`
+        const base = at ? Date.parse(at) : now;
+        assert.notEqual(resetEpoch(text, base, 999), base + 999, `should parse: ${text}`);
       }
     }
   });
@@ -149,9 +154,12 @@ describe('reset scheduling', () => {
   });
 
   it('parses the pipe-epoch and compact relative forms', () => {
-    assert.equal(resetEpoch('Claude AI usage limit reached|1893456000', 0), 1_893_456_000_000);
-    assert.equal(resetEpoch('Claude AI usage limit reached|1893456000123', 0), 1_893_456_000_123);
+    const eve = 1_893_456_000_000 - 3_600_000;
+    assert.equal(resetEpoch('Claude AI usage limit reached|1893456000', eve), 1_893_456_000_000);
+    assert.equal(resetEpoch('Claude AI usage limit reached|1893456000123', eve), 1_893_456_000_123);
     assert.equal(resetEpoch('Claude AI usage limit reached|1893456000', 1_900_000_000_000), 1_900_000_000_000, 'never in the past');
+    assert.ok(Number.isNaN(resetEpoch('Claude AI usage limit reached|18934560001', eve, Number.NaN)), '11-digit epochs are not a known form');
+    assert.ok(Number.isNaN(resetEpoch('Claude AI usage limit reached|1893456000', 0, Number.NaN)), 'more than 8 days out is untrusted');
     assert.equal(resetEpoch('resets in 2h 30m', 1_000), 1_000 + 9_000_000);
     assert.equal(resetEpoch('resets 2h30m', 1_000), 1_000 + 9_000_000);
     assert.equal(resetEpoch('try again in 1 hr 5 min', 1_000), 1_000 + 3_900_000);
@@ -161,7 +169,7 @@ describe('reset scheduling', () => {
   });
 
   it('parses the dated form', () => {
-    const result = resetEpoch('try again at Jul 5th, 2030 4:09 PM UTC', 0);
+    const result = resetEpoch('try again at Jul 5th, 2030 4:09 PM UTC', Date.parse('2030-07-01T00:00:00Z'));
     assert.equal(result, Date.parse('Jul 5, 2030 4:09 PM UTC'));
   });
 
@@ -181,7 +189,8 @@ describe('reset scheduling', () => {
       resetEpoch('weekly limit; resets Jan 2, 10am UTC', Date.parse('2030-12-30T00:00:00Z'), Number.NaN),
       Date.parse('2031-01-02T10:00:00Z'),
     );
-    assert.equal(resetEpoch('resets Oct 9, 2031 10am UTC', now, Number.NaN), Date.parse('2031-10-09T10:00:00Z'), 'explicit year kept');
+    assert.equal(resetEpoch('resets Oct 15, 2030 10am UTC', now, Number.NaN), Date.parse('2030-10-15T10:00:00Z'), 'explicit year within the window kept');
+    assert.ok(Number.isNaN(resetEpoch('resets Oct 9, 2031 10am UTC', now, Number.NaN)), 'a year out is capped even with an explicit year');
     assert.equal(
       resetEpoch('usage limit resets 5 (UTC)', Date.parse('2030-01-01T04:00:00Z')),
       Date.parse('2030-01-01T05:00:00Z'),

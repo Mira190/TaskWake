@@ -7,7 +7,7 @@ import {
   jsonCodexArgs, readCodexJson, resetEpoch,
 } from '../src/core.js';
 import { dashboardPage } from '../src/dashboard-page.js';
-import { isChineseLocale } from '../src/i18n.js';
+import { isChineseLocale, useChinese } from '../src/i18n.js';
 import { canShowTerminal, linuxTerminals, openWithCandidates, resumeArgv } from '../src/store.js';
 import { evaluateProbe, originalStillRunning, shouldOpenTerminal } from '../src/waiter.js';
 
@@ -101,6 +101,15 @@ describe('locale detection', () => {
     assert.equal(isChineseLocale('zh_TW'), true);
     assert.equal(isChineseLocale('en-US'), false);
     assert.equal(isChineseLocale('ja-JP'), false);
+  });
+
+  it('lets TASKWAKE_LANG override the system locale', () => {
+    assert.equal(useChinese({ TASKWAKE_LANG: 'zh' }, 'en-US'), true);
+    assert.equal(useChinese({ TASKWAKE_LANG: 'zh-CN' }, 'en-US'), true);
+    assert.equal(useChinese({ TASKWAKE_LANG: 'en' }, 'zh-CN'), false);
+    assert.equal(useChinese({ TASKWAKE_LANG: 'fr' }, 'zh-CN'), false);
+    assert.equal(useChinese({}, 'zh-CN'), true);
+    assert.equal(useChinese({}, 'en-US'), false);
   });
 });
 describe('dashboard localization', () => {

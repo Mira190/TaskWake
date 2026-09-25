@@ -3,5 +3,9 @@ export function isChineseLocale(value = '') {
 }
 
 export const locale = Intl.DateTimeFormat().resolvedOptions().locale || 'en';
-export const chinese = isChineseLocale(locale);
+// TASKWAKE_LANG=zh forces Chinese; any other value forces English.
+export function useChinese(env = process.env, system = locale) {
+  return isChineseLocale(env.TASKWAKE_LANG || system);
+}
+export const chinese = useChinese();
 export const t = (english, simplifiedChinese) => chinese ? simplifiedChinese : english;

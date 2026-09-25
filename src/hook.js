@@ -10,6 +10,7 @@ import { t } from './i18n.js';
 import { loadConfig, log, pendingDir, readJson, sessionsDir, writeAtomic } from './store.js';
 
 const kinds = { rate_limit: 'usage', overloaded: 'overload', server_error: 'overload' };
+const RALPH_CAP = 8; // Claude Code ends the turn after 8 consecutive Stop-hook blocks
 const ralphFile = (session) => join(dirname(pendingDir), 'ralph', `${cleanId(session)}.json`);
 
 export async function saveEvent(input) {
@@ -115,8 +116,10 @@ export async function ralph(input, config) {
   const file = ralphFile(session);
   const previous = await readJson(file);
   const turns = (previous?.turns || 0) + 1;
+  const limit = Math.min(config.ralphMaxTurns, RALPH_CAP);
+  if (turns === 1 && config.ralphMaxTurns > RALPH_CAP) await log(`ralph ralphMaxTurns=${config.ralphMaxTurns} clamped to ${RALPH_CAP} session=${session}`);
   const done = /\[RALPH_DONE\]/i.test(input.last_assistant_message || '');
-  if (done || turns >= config.ralphMaxTurns) {
+  if (done || turns >= limit) {
     await unlink(file).catch(() => {});
     await log(`ralph stopped session=${session} reason=${done ? 'done' : 'max-turns'} turns=${turns}`);
     return undefined;
@@ -126,8 +129,8 @@ export async function ralph(input, config) {
   return {
     decision: 'block',
     reason: t(
-      `Ralph loop turn ${turns}/${config.ralphMaxTurns}: continue autonomously. Finish and verify the current task. If complete, inspect TODO.md, REVIEW_AND_HANDOFF.md, GAME_DESIGN.md, tests, and the working tree; execute the highest-priority safe local task already implied by them. Make reversible project-local choices without asking. Do not invent scope, modify global Claude settings, deploy, publish, push, change credentials, spend money, or terminate processes you did not start. Never mass-kill by process name. When no safe local task remains, end with [RALPH_DONE].`,
-      `Ralph 循环 ${turns}/${config.ralphMaxTurns}：自主继续。完成并验证当前任务；如果已经完成，请检查 TODO.md、REVIEW_AND_HANDOFF.md、GAME_DESIGN.md、测试和工作树，执行其中已明确的最高优先级安全本地任务。对可逆的项目内选择自行决定，无需询问。不得擅自扩大范围、修改 Claude 全局设置、部署、发布、推送、修改凭据、花费资金或终止本轮未启动的进程；不得按进程名批量终止。没有安全本地任务时以 [RALPH_DONE] 结束。`,
+      `Ralph loop turn ${turns}/${limit}: continue autonomously. Finish and verify the current task. If complete, inspect TODO.md, REVIEW_AND_HANDOFF.md, GAME_DESIGN.md, tests, and the working tree; execute the highest-priority safe local task already implied by them. Make reversible project-local choices without asking. Do not invent scope, modify global Claude settings, deploy, publish, push, change credentials, spend money, or terminate processes you did not start. Never mass-kill by process name. When no safe local task remains, end with [RALPH_DONE].`,
+      `Ralph 循环 ${turns}/${limit}：自主继续。完成并验证当前任务；如果已经完成，请检查 TODO.md、REVIEW_AND_HANDOFF.md、GAME_DESIGN.md、测试和工作树，执行其中已明确的最高优先级安全本地任务。对可逆的项目内选择自行决定，无需询问。不得擅自扩大范围、修改 Claude 全局设置、部署、发布、推送、修改凭据、花费资金或终止本轮未启动的进程；不得按进程名批量终止。没有安全本地任务时以 [RALPH_DONE] 结束。`,
     ),
   };
 }

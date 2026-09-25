@@ -116,13 +116,16 @@ the working tree.
 {
   "claudeCmd": ["claude", "--permission-mode", "auto"],
   "ralph": true,
-  "ralphMaxTurns": 20
+  "ralphMaxTurns": 8
 }
 ```
 
 Put this in `~/.taskwake.json`. Ralph continues in the same Claude session; it does not
 create a fresh chat. The loop stops when Claude emits `[RALPH_DONE]`, reaches
 `ralphMaxTurns`, or hits another limit; a later taskwake resumes the same bounded loop.
+Claude Code itself ends a turn after 8 consecutive `Stop`-hook continuations, so
+TaskWake clamps `ralphMaxTurns` to at most 8 (and logs once when it clamps); larger
+values cannot take effect within one user turn.
 It never instructs Claude to modify global Claude settings, deploy, publish, push, change
 credentials, spend money, mass-kill processes, or invent product scope. Claude's native
 `/goal` remains optional and works alongside the Ralph hook.

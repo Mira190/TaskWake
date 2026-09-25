@@ -278,6 +278,16 @@ describe('Ralph loop', () => {
       session_id: 'ralph-done', last_assistant_message: 'All safe local work is complete. [RALPH_DONE]',
     }, settings), undefined, 'sentinel stops');
   });
+
+  it('clamps ralphMaxTurns to the 8 consecutive continuations Claude Code allows', async () => {
+    const settings = { ...defaults, ralph: true, ralphMaxTurns: 20 };
+    for (let turn = 1; turn < 8; turn++) {
+      const output = await ralph({ session_id: 'ralph-cap' }, settings);
+      assert.equal(output?.decision, 'block', `turn ${turn}`);
+      assert.match(output.reason, new RegExp(`${turn}/8`));
+    }
+    assert.equal(await ralph({ session_id: 'ralph-cap' }, settings), undefined, 'eighth turn stops');
+  });
 });
 describe('waiter end to end', () => {
   it('sleeps until the hint, probes with --resume, records success (subprocess)', async () => {

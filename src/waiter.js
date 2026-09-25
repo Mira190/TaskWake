@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { cleanId, failureKind, isWeekly, resetEpoch } from './core.js';
 import { t } from './i18n.js';
-import { canShowTerminal, doneDir, home, loadConfig, log, notify, openTerminal, pendingDir, readJson, resumeArgv, runCommand, sessionsDir, writeAtomic } from './store.js';
+import { canShowTerminal, doneDir, home, loadConfig, log, notify, openTerminal, pendingDir, pruneDone, readJson, resumeArgv, runCommand, sessionsDir, writeAtomic } from './store.js';
 
 const CHUNK = 60_000; // local cancellation/clock check; this never calls Claude
 const GATE_STALE_MS = 2 * 60_000;
@@ -126,6 +126,7 @@ export async function wait(session, config) {
     await writeAtomic(join(doneDir, `${cleanId(session)}.json`), record);
     await unlink(file).catch(() => {});
     await log(`${status} session=${session}`);
+    await pruneDone().catch(() => {});
     return record;
   };
 

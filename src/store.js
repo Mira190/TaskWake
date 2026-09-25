@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { defaults } from './core.js';
@@ -67,6 +67,17 @@ export async function writeAtomic(path, value) {
   const temporary = `${path}.${process.pid}.${writes++}.${Math.random().toString(36).slice(2)}`;
   await writeFile(temporary, JSON.stringify(value, null, 1));
   await rename(temporary, path);
+}
+
+// Keep the newest `keep` outcomes and drop anything older than `maxAgeMs`.
+export async function pruneDone(dir = doneDir, now = Date.now(), keep = 100, maxAgeMs = 30 * 86_400_000) {
+  let names;
+  try { names = (await readdir(dir)).filter((name) => name.endsWith('.json')); } catch { return 0; }
+  const records = await Promise.all(names.map(async (name) => ({ name, at: (await readJson(join(dir, name)))?.finishedAt || 0 })));
+  records.sort((a, b) => b.at - a.at);
+  const stale = records.filter((record, index) => index >= keep || record.at < now - maxAgeMs);
+  await Promise.all(stale.map(({ name }) => unlink(join(dir, name)).catch(() => {})));
+  return stale.length;
 }
 
 export async function log(text) {

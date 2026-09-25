@@ -8,7 +8,7 @@ import { cleanId } from '../src/core.js';
 import { startDashboard } from '../src/dashboard.js';
 import { runCodex } from '../src/codex.js';
 import { locale, t } from '../src/i18n.js';
-import { doneDir, loadConfig, pendingDir, readJson, tailLog } from '../src/store.js';
+import { doneDir, loadConfig, pendingDir, pruneDone, readJson, tailLog } from '../src/store.js';
 
 async function list(dir) {
   try {
@@ -24,6 +24,7 @@ const statusName = (status) => ({
 
 async function status() {
   const config = await loadConfig();
+  await pruneDone();
   const pending = await list(pendingDir);
   const done = (await list(doneDir)).sort((a, b) => b.finishedAt - a.finishedAt).slice(0, 10);
   for (const item of pending) {

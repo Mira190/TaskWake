@@ -9,7 +9,7 @@ import { home, pendingDir, doneDir, sessionsDir, loadConfig, log, openTerminal, 
 import { dashboardPage } from './dashboard-page.js';
 
 const ralphDir = join(home, 'ralph');
-const transcriptCache = new Map();
+let projectListing;
 const opening = new Set();
 
 async function listJson(dir) {
@@ -26,19 +26,15 @@ function alive(pid) {
 
 const compact = (value, max = 360) => String(value || '').replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
 
+// One recursive listing of ~/.claude/projects per minute, shared by every session lookup.
 async function findTranscript(session) {
-  const cached = transcriptCache.get(session);
-  if (cached && Date.now() - cached.at < 60_000) return cached.path;
-  let path;
-  try {
-    const root = join(homedir(), '.claude', 'projects');
-    const names = await readdir(root, { recursive: true });
-    const suffix = `${session}.jsonl`.toLowerCase();
-    const match = names.find((name) => String(name).toLowerCase().endsWith(suffix));
-    if (match) path = join(root, match);
-  } catch { /* Claude storage is optional */ }
-  transcriptCache.set(session, { path, at: Date.now() });
-  return path;
+  const root = join(homedir(), '.claude', 'projects');
+  if (!projectListing || Date.now() - projectListing.at > 60_000) {
+    projectListing = { at: Date.now(), names: readdir(root, { recursive: true }).catch(() => []) }; // Claude storage is optional
+  }
+  const suffix = `${session}.jsonl`.toLowerCase();
+  const match = (await projectListing.names).find((name) => String(name).toLowerCase().endsWith(suffix));
+  return match ? join(root, match) : undefined;
 }
 
 async function tailText(path, bytes = 160_000) {
@@ -114,7 +110,6 @@ export async function buildSnapshot() {
   for (const item of map.values()) {
     const source = item.pending || item.registry || item.done || {};
     const transcriptPath = source.transcriptPath || item.registry?.transcriptPath || item.done?.transcriptPath || await findTranscript(item.session);
-    const activity = await readActivity(transcriptPath);
     let transcriptAt = 0;
     try { transcriptAt = (await stat(transcriptPath)).mtimeMs; } catch { /* no transcript */ }
     const updatedAt = Math.max(transcriptAt,
@@ -137,7 +132,6 @@ export async function buildSnapshot() {
       status: statusFor(item),
       updatedAt,
       transcriptPath,
-      activity,
     });
   }
 
@@ -154,6 +148,8 @@ export async function buildSnapshot() {
 
   const priority = { running: 0, active: 1, waiting: 2, orphaned: 3, stale: 4, ended: 5, opened: 6, resumed: 7, failed: 8, done: 9 };
   sessions.sort((a, b) => (priority[a.status] ?? 9) - (priority[b.status] ?? 9) || b.updatedAt - a.updatedAt);
+  const shown = sessions.slice(0, 30);
+  await Promise.all(shown.map(async (item) => { item.activity = await readActivity(item.transcriptPath); }));
   return {
     generatedAt: Date.now(),
     summary: {
@@ -162,7 +158,7 @@ export async function buildSnapshot() {
       ralph: sessions.filter((item) => item.ralphTurns && ['active', 'running', 'waiting', 'orphaned'].includes(item.status)).length,
       conflicts,
     },
-    sessions: sessions.slice(0, 30),
+    sessions: shown,
     logs: await tailLog(50),
   };
 }
@@ -198,9 +194,15 @@ async function readBody(request, limit = 4_096) {
 }
 export async function startDashboard({ port = 4178, open = true } = {}) {
   let dashboardOrigin;
+  let allowedHosts = new Set();
   const server = createServer(async (request, response) => {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
+    if (!allowedHosts.has(String(request.headers.host).toLowerCase())) { // DNS rebinding guard
+      response.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      response.end('Forbidden');
+      return;
+    }
     if (request.url === '/') {
       response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       response.end(dashboardPage);
@@ -258,7 +260,9 @@ export async function startDashboard({ port = 4178, open = true } = {}) {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', resolve);
   });
-  const url = `http://127.0.0.1:${server.address().port}`;
+  const bound = server.address().port;
+  allowedHosts = new Set([`127.0.0.1:${bound}`, `localhost:${bound}`, `[::1]:${bound}`]);
+  const url = `http://127.0.0.1:${bound}`;
   dashboardOrigin = url;
   process.stdout.write(t(`TaskWake dashboard: ${url}\n`, `TaskWake 控制台：${url}\n`));
   if (open) openBrowser(url);

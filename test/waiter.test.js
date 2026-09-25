@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
+import { request } from 'node:http';
 import { mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,7 +14,7 @@ process.env.REWAKE_CONFIG = join(tmp, 'config.json');
 
 const { saveEvent, reconcile, ralph, trackSession } = await import('../src/hook.js');
 const { claimUsageProbe, wait } = await import('../src/waiter.js');
-const { home, pendingDir, doneDir, sessionsDir, readJson, writeAtomic } = await import('../src/store.js');
+const { home, pendingDir, doneDir, sessionsDir, pruneDone, readJson, writeAtomic } = await import('../src/store.js');
 const { defaults } = await import('../src/core.js');
 const { buildSnapshot, canOpenSession, startDashboard } = await import('../src/dashboard.js');
 
@@ -197,6 +198,24 @@ describe('multi-session tracking and dashboard', () => {
       await new Promise((resolve) => server.close(resolve));
     }
   });
+  it('rejects requests whose Host header is not the loopback dashboard', async () => {
+    const server = await startDashboard({ port: 0, open: false });
+    const { port } = server.address();
+    const get = (host) => new Promise((resolve, reject) => {
+      request({ host: '127.0.0.1', port, path: '/api', headers: { Host: host } }, (response) => {
+        response.resume();
+        resolve(response.statusCode);
+      }).once('error', reject).end();
+    });
+    try {
+      assert.equal(await get(`evil.example:${port}`), 403);
+      assert.equal(await get(`127.0.0.1:${port}`), 200);
+      assert.equal(await get(`localhost:${port}`), 200);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it('tracks lifecycle, transcript activity, and same-directory conflicts', async () => {
     const transcriptA = join(tmp, 'tracked-a.jsonl');
     const transcriptB = join(tmp, 'tracked-b.jsonl');
@@ -228,6 +247,21 @@ describe('multi-session tracking and dashboard', () => {
     assert.equal(ended.reason, 'other');
   });
 });
+describe('done housekeeping', () => {
+  it('keeps the newest 100 outcomes and drops ones older than 30 days', async () => {
+    const dir = join(tmp, 'prune');
+    const now = Date.now();
+    const day = 86_400_000;
+    await Promise.all(Array.from({ length: 105 }, (_, index) => writeAtomic(join(dir, `r${index}.json`), { finishedAt: now - index * 1_000 })));
+    await writeAtomic(join(dir, 'old.json'), { finishedAt: now - 31 * day });
+    assert.equal(await pruneDone(dir, now), 6);
+    for (const name of ['r0', 'r99']) assert.ok(await readJson(join(dir, `${name}.json`)), name);
+    for (const name of ['r100', 'r104', 'old']) assert.equal(await readJson(join(dir, `${name}.json`)), undefined, name);
+    await writeAtomic(join(dir, 'r0.json'), { finishedAt: now - 40 * day });
+    assert.equal(await pruneDone(dir, now), 1, 'age limit applies inside the newest 100 too');
+  });
+});
+
 describe('Ralph loop', () => {
   it('continues every session when enabled and obeys done and turn limits', async () => {
     const settings = { ...defaults, ralph: true, ralphMaxTurns: 2 };

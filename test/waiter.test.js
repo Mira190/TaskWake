@@ -22,6 +22,7 @@ const hookPath = fileURLToPath(new URL('../src/hook.js', import.meta.url));
 const callsFile = join(tmp, 'shim-calls.txt');
 const shimOk = join(tmp, 'shim-ok.mjs');
 const shimLimited = join(tmp, 'shim-limited.mjs');
+const shimTimed = join(tmp, 'shim-timed.mjs'); // argv: <log file> <ok|limited> …claude args
 const config = (claudeCmd) => ({
   ...defaults, claudeCmd, resumeMode: 'headless', marginMs: 0, notify: 'none', maxAttempts: 2,
   usagePollMs: 50, usageResumeSpacingMs: 50, overloadMs: [50, 50],
@@ -38,6 +39,21 @@ before(async () => {
     process.stdout.write("You've hit your session limit");
     process.exit(1);
   `);
+  await writeFile(shimTimed, `
+    import { appendFile } from 'node:fs/promises';
+    const [log, mode] = process.argv.slice(2);
+    await appendFile(log, Date.now() + '\\n');
+    if (mode === 'limited') { process.stdout.write("You've hit your session limit"); process.exit(1); }
+    process.stdout.write('{"type":"result","subtype":"success","is_error":false,"result":"ok"}');
+  `);
+});
+
+const timed = (name, mode = 'ok') => [process.execPath, shimTimed, join(tmp, `calls-${name}.txt`), mode];
+const stamps = async (name) => (await readFile(join(tmp, `calls-${name}.txt`), 'utf8').catch(() => ''))
+  .trim().split('\n').filter(Boolean).map(Number);
+const usageRecord = (session, extra = {}) => ({
+  session, kind: 'usage', errorType: 'rate_limit', details: 'session limit',
+  transcriptBytes: 0, receivedAt: Date.now(), ...extra,
 });
 
 after(async () => { await rm(tmp, { recursive: true, force: true }); });
@@ -258,5 +274,65 @@ describe('waiter end to end', () => {
     setTimeout(() => unlink(pending).catch(() => {}), 100);
     assert.equal(await running, undefined);
     assert.equal(await readJson(join(doneDir, 'cxl.json')), undefined, 'no done record');
+  });
+});
+
+describe('waiter deadline state machine', () => {
+  it('never probes before a trusted deadline', async () => {
+    const now = Date.now();
+    await writeAtomic(join(pendingDir, 'dl-trusted.json'), usageRecord('dl-trusted', {
+      receivedAt: now, resetParsed: true, resetHint: now + 400,
+    }));
+    const result = await wait('dl-trusted', { ...config(timed('trusted')), usagePollMs: 50 });
+    assert.equal(result.status, 'resumed');
+    const calls = await stamps('trusted');
+    assert.equal(calls.length, 1, 'no speculative probes');
+    assert.ok(calls[0] >= now + 400, `first probe ${calls[0] - now} ms after failure`);
+  });
+
+  it('counts only failures at or after an untrusted deadline', async () => {
+    await writeAtomic(join(pendingDir, 'dl-untrusted.json'), usageRecord('dl-untrusted', {
+      resetParsed: false, resetHint: 0,
+    }));
+    const started = Date.now();
+    const result = await wait('dl-untrusted', {
+      ...config(timed('untrusted', 'limited')), fallbackMs: 300, usagePollMs: 50, maxAttempts: 1,
+    });
+    assert.equal(result.status, 'gave-up');
+    assert.equal(result.attempts, 1);
+    assert.ok(result.probes > 1, `probes=${result.probes}`);
+    assert.ok(result.finishedAt >= started + 300, 'gave up only after the deadline');
+    const calls = await stamps('untrusted');
+    assert.ok(calls.filter((at) => at < started + 300).length >= 1, 'speculative probes before the deadline');
+  });
+
+  it('skips an oversized overload headlessly without a usage wait', async () => {
+    await writeAtomic(join(pendingDir, 'dl-ovbig.json'), usageRecord('dl-ovbig', {
+      kind: 'overload', errorType: 'overloaded', transcriptBytes: defaults.maxContextResume + 1,
+    }));
+    const started = Date.now();
+    const result = await wait('dl-ovbig', { ...config(timed('ovbig')), fallbackMs: 60_000 });
+    assert.equal(result.status, 'skipped-context');
+    assert.ok(Date.now() - started < 2_000);
+  });
+
+  it('resumes an overload after the first backoff', async () => {
+    await writeAtomic(join(pendingDir, 'dl-over.json'), usageRecord('dl-over', {
+      kind: 'overload', errorType: 'overloaded', details: 'API Error 529',
+    }));
+    const started = Date.now();
+    const result = await wait('dl-over', { ...config(timed('over')), overloadMs: [500, 500] });
+    assert.equal(result.status, 'resumed');
+    assert.ok(Date.now() - started < 1_000, `took ${Date.now() - started} ms`);
+  });
+
+  it('ignores a parsed reset more than 8 days away', async () => {
+    const now = Date.now();
+    await writeAtomic(join(pendingDir, 'dl-far.json'), usageRecord('dl-far', {
+      receivedAt: now, resetParsed: true, resetHint: now + 30 * 24 * 3_600_000,
+    }));
+    const result = await wait('dl-far', { ...config(timed('far')), fallbackMs: 100 });
+    assert.equal(result.status, 'resumed');
+    assert.ok(Date.now() - now < 1_000);
   });
 });

@@ -58,20 +58,30 @@ async function setUsageGate(session, nextProbeAt, result) {
   }));
 }
 
-function initialDeadline(state, config) {
+const MAX_AHEAD_MS = 8 * 24 * 3_600_000;
+const capped = (epoch, now) => (epoch - now > MAX_AHEAD_MS ? Number.NaN : epoch);
+
+// The deadline moves only on new provider information; see README "How it works".
+export function initialDeadline(state, config) {
   const now = state.receivedAt || Date.now();
-  const parsed = resetEpoch(state.details, now, Number.NaN);
+  if (state.kind === 'overload') return { deadline: now, trusted: false, tooFar: false };
+  let parsed = Number.NaN;
+  if (state.resetParsed === true && Number.isFinite(state.resetHint)) parsed = state.resetHint;
+  else if (state.resetParsed === undefined) parsed = resetEpoch(state.details, now, Number.NaN);
+  const tooFar = Number.isFinite(parsed) && Number.isNaN(capped(parsed, now));
+  if (tooFar) return { deadline: now + config.fallbackMs + config.marginMs, trusted: false, tooFar };
   const trusted = Number.isFinite(parsed);
   const hint = trusted ? parsed : (state.resetHint || now + config.fallbackMs);
-  return { deadline: hint + config.marginMs, trusted };
+  return { deadline: hint + config.marginMs, trusted, tooFar };
 }
 
 function nextUsageCheck(deadline, config, now = Date.now()) {
   return Math.max(now, Math.min(deadline, now + jitter(config.usagePollMs, 0.08)));
 }
 
-export async function shouldOpenTerminal(kind, mode, deadline, now = Date.now(), env = process.env, platform = process.platform, probe) {
-  return kind === 'usage' && mode !== 'headless' && now >= deadline && await canShowTerminal(env, platform, probe);
+export async function shouldOpenTerminal(kind, mode, deadline, now = Date.now(), env = process.env, platform = process.platform, probe, oversized = false) {
+  return (kind === 'usage' || (kind === 'overload' && oversized)) && mode !== 'headless' && now >= deadline
+    && await canShowTerminal(env, platform, probe);
 }
 
 export async function wait(session, config) {
@@ -96,10 +106,14 @@ export async function wait(session, config) {
   }
   const oversized = state.transcriptBytes > config.maxContextResume;
 
-  let { deadline, trusted } = initialDeadline(state, config);
-  let until = state.kind === 'usage'
-    ? nextUsageCheck(deadline, config)
-    : Date.now() + jitter(config.overloadMs[0]);
+  let { deadline, trusted, tooFar } = initialDeadline(state, config);
+  if (tooFar) await log(`reset hint ignored (too far) session=${session}`);
+  // Trusted usage deadlines are never probed early; oversized transcripts cannot go
+  // headless, so they have nothing to gain from speculative probes either.
+  const sleepUntil = (now = Date.now()) => (state.kind !== 'usage'
+    ? now + jitter(config.overloadMs[Math.min(state.attempts, config.overloadMs.length - 1)])
+    : trusted || oversized ? deadline : nextUsageCheck(deadline, config, now));
+  let until = sleepUntil();
   state.nextTry = until;
   await writeAtomic(file, state);
 
@@ -110,13 +124,6 @@ export async function wait(session, config) {
     }
 
     const wasUsage = state.kind === 'usage';
-    const earlyTrustedProbe = wasUsage && trusted && Date.now() < deadline;
-    if (oversized && Date.now() < deadline) {
-      until = deadline;
-      state.nextTry = until;
-      await writeAtomic(file, state);
-      continue;
-    }
     if (wasUsage) {
       const gate = await claimUsageProbe(session, config);
       if (!gate.claimed) {
@@ -127,10 +134,10 @@ export async function wait(session, config) {
       }
     }
 
-    if (await shouldOpenTerminal(state.kind, config.resumeMode, deadline)) {
+    if (await shouldOpenTerminal(state.kind, config.resumeMode, deadline, Date.now(), process.env, process.platform, undefined, oversized)) {
       try {
         const terminalPid = await openTerminal([...config.claudeCmd, '--resume', session, config.retryText], state.cwd);
-        await setUsageGate(session, Date.now() + config.usageResumeSpacingMs, 'opened');
+        if (wasUsage) await setUsageGate(session, Date.now() + config.usageResumeSpacingMs, 'opened');
         notify('TaskWake', t('Session opened in a terminal.', '会话已在终端中打开。'), config);
         return finish('opened', { attempts: state.probes, terminalPid });
       } catch (error) {
@@ -143,6 +150,7 @@ export async function wait(session, config) {
     }
 
     state.probes++;
+    const started = Date.now();
     await log(`probe session=${session} probe=${state.probes} failures=${state.attempts}`);
     const result = await runCommand(
       [...config.claudeCmd, '--resume', session, '-p', config.retryText, '--output-format', 'json'],
@@ -165,18 +173,28 @@ export async function wait(session, config) {
     const now = Date.now();
     if (kind === 'usage') {
       state.kind = 'usage';
-      const parsed = resetEpoch(combined, now, Number.NaN);
-      trusted = Number.isFinite(parsed);
-      deadline = (trusted ? parsed : now + config.fallbackMs) + config.marginMs;
-      if (!earlyTrustedProbe || !trusted) state.attempts++;
-      until = Math.max(now + Math.min(CHUNK, config.usagePollMs), nextUsageCheck(deadline, config, now));
+      const raw = resetEpoch(combined, now, Number.NaN);
+      const parsed = capped(raw, now);
+      if (Number.isFinite(raw) && !Number.isFinite(parsed)) await log(`reset hint ignored (too far) session=${session}`);
+      if (started < deadline) { // speculative: the provider window had not reset yet
+        if (Number.isFinite(parsed)) {
+          deadline = parsed + config.marginMs;
+          trusted = true;
+        }
+        until = sleepUntil(now);
+      } else {
+        state.attempts++;
+        trusted = Number.isFinite(parsed);
+        deadline = trusted ? parsed + config.marginMs : now + jitter(config.usagePollMs, 0.08);
+        until = deadline;
+      }
+      until = Math.max(until, now + Math.min(CHUNK, config.usagePollMs)); // never hot-loop a limited account
       await setUsageGate(session, until, trusted ? 'still-limited' : 'limit-time-unknown');
     } else {
       state.attempts++;
-      const index = Math.min(state.attempts, config.overloadMs.length - 1);
-      until = now + jitter(config.overloadMs[index]);
-      if (wasUsage) await setUsageGate(session, Math.max(now + CHUNK, until), kind || `exit-${result.code}`);
       if (kind) state.kind = kind;
+      until = now + jitter(config.overloadMs[Math.min(state.attempts, config.overloadMs.length - 1)]);
+      if (wasUsage) await setUsageGate(session, Math.max(now + CHUNK, until), kind || `exit-${result.code}`);
     }
 
     Object.assign(state, { nextTry: until, lastError: combined.slice(-1_000) });

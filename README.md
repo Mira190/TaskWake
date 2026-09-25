@@ -55,11 +55,19 @@ Troubleshooting:
    hook with the session id and error details.
 2. taskwake records the session under `~/.taskwake/pending/` and spawns one
    short-lived waiter process (no daemon).
-3. Usage waiters share one account-level gate. They probe at most once per hour
-   (with jitter) or at the parsed reset time, whichever comes first. Parse failures
-   fall back to the 5-hour window, then **probe**: `claude --resume <id> -p "Continue from
-   the interruption."` — if still limited, it re-parses and re-waits, bounded
-   by `maxAttempts`.
+3. The waiter fixes a **deadline** when it starts and moves it only on new provider
+   information. A reset time parsed from the banner is *trusted*: the waiter sleeps
+   until it (plus `marginMs`) and never probes earlier. Without a parsed time (or one
+   more than 8 days away, which is ignored) the deadline is the 5-hour `fallbackMs`
+   window, and the waiter may make *speculative* probes up to once per `usagePollMs`
+   (with jitter) before it. A **probe** is `claude --resume <id> -p "Continue from the
+   interruption."`. A speculative probe that is still limited never counts as a
+   failure; if its output names a reset time, that becomes the new trusted deadline.
+   Only failures at or after the deadline count towards `maxAttempts`; after each one
+   the waiter re-parses the output, or probes again one `usagePollMs` later. Usage
+   waiters share one account-level gate so several sessions never probe together.
+   Overload / server errors are eligible immediately and retry on the short
+   `overloadMs` backoff instead.
 4. At the real reset deadline, the default `hybrid` mode opens the same session in
    a new native terminal when a desktop is available. Otherwise it resumes headlessly.
 5. Multi-session aware: `SessionStart` registers each Claude session and also repairs

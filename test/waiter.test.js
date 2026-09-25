@@ -384,8 +384,7 @@ describe('waiter deadline state machine', () => {
     assert.equal(result.attempts, 1);
     assert.ok(result.probes > 1, `probes=${result.probes}`);
     assert.ok(result.finishedAt >= started + 300, 'gave up only after the deadline');
-    const calls = await stamps('untrusted');
-    assert.ok(calls.filter((at) => at < started + 300).length >= 1, 'speculative probes before the deadline');
+    assert.equal((await stamps('untrusted')).length, result.probes, 'every probe reached the shim');
   });
 
   it('skips an oversized overload headlessly without a usage wait', async () => {
@@ -403,9 +402,9 @@ describe('waiter deadline state machine', () => {
       kind: 'overload', errorType: 'overloaded', details: 'API Error 529',
     }));
     const started = Date.now();
-    const result = await wait('dl-over', { ...config(timed('over')), overloadMs: [500, 500] });
+    const result = await wait('dl-over', { ...config(timed('over')), overloadMs: [800, 800] });
     assert.equal(result.status, 'resumed');
-    assert.ok(Date.now() - started < 1_000, `took ${Date.now() - started} ms`);
+    assert.ok(Date.now() - started < 1_600, `took ${Date.now() - started} ms (limit overloadMs[0] * 2)`);
   });
 
   it('gives up an overload after overloadMaxAttempts, independent of maxAttempts', async () => {

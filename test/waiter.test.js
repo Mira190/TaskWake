@@ -45,6 +45,7 @@ before(async () => {
     const [log, mode] = process.argv.slice(2);
     await appendFile(log, Date.now() + '\\n');
     if (mode === 'limited') { process.stdout.write("You've hit your session limit"); process.exit(1); }
+    if (mode === 'overloaded') { process.stderr.write('API Error 529: service overloaded'); process.exit(1); }
     process.stdout.write('{"type":"result","subtype":"success","is_error":false,"result":"ok"}');
   `);
 });
@@ -405,6 +406,16 @@ describe('waiter deadline state machine', () => {
     const result = await wait('dl-over', { ...config(timed('over')), overloadMs: [500, 500] });
     assert.equal(result.status, 'resumed');
     assert.ok(Date.now() - started < 1_000, `took ${Date.now() - started} ms`);
+  });
+
+  it('gives up an overload after overloadMaxAttempts, independent of maxAttempts', async () => {
+    await writeAtomic(join(pendingDir, 'dl-overmax.json'), usageRecord('dl-overmax', {
+      kind: 'overload', errorType: 'overloaded', details: 'API Error 529',
+    }));
+    const result = await wait('dl-overmax', { ...config(timed('overmax', 'overloaded')), maxAttempts: 2, overloadMaxAttempts: 3 });
+    assert.equal(result.status, 'gave-up');
+    assert.equal(result.attempts, 3);
+    assert.equal((await stamps('overmax')).length, 3);
   });
 
   it('ignores a parsed reset more than 8 days away', async () => {

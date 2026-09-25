@@ -38,6 +38,7 @@ export async function loadConfig() {
     if (Array.isArray(raw.claudeCmd) && raw.claudeCmd.length && raw.claudeCmd.every((item) => typeof item === 'string')) {
       config.claudeCmd = raw.claudeCmd;
     }
+    if (Number.isInteger(raw.overloadMaxAttempts) && raw.overloadMaxAttempts >= 1) config.overloadMaxAttempts = raw.overloadMaxAttempts;
     if (typeof raw.ralph === 'boolean') config.ralph = raw.ralph;
     if (typeof raw.inheritPermissionMode === 'boolean') config.inheritPermissionMode = raw.inheritPermissionMode;
     if (Number.isInteger(raw.ralphMaxTurns) && raw.ralphMaxTurns > 0) config.ralphMaxTurns = raw.ralphMaxTurns;

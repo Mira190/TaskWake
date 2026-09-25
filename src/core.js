@@ -10,6 +10,7 @@ export const defaults = Object.freeze({
   retryText: 'Continue from the interruption.',
   resumeMode: 'hybrid',
   maxAttempts: 4,
+  overloadMaxAttempts: 8,
   overloadMs: [30_000, 60_000, 120_000, 240_000, 300_000],
   maxContextResume: 2_000_000,
   weeklyPolicy: 'notify',

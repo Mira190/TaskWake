@@ -184,6 +184,7 @@ Optional config at `~/.taskwake.json`:
 | `usagePollMs`      | `3600000` (1 h, shared across sessions) |
 | `usageResumeSpacingMs` | `300000` (5 min between resumed sessions) |
 | `maxAttempts`      | `4`                                  |
+| `overloadMaxAttempts` | `8` (overload / server-error failures before giving up) |
 | `overloadMs`       | `[30000, 60000, 120000, 240000, 300000]` |
 | `maxContextResume` | `2000000` (bytes)                    |
 | `weeklyPolicy`     | `"notify"` (`"resume"` to auto-resume) |

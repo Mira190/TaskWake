@@ -150,11 +150,12 @@ export async function wait(session, config) {
     await log(`original claude still running pid=${current.claudePid} session=${session}`);
     return ` ${t('Original terminal still open; close it to avoid two Claudes on one transcript.', '原终端仍在运行，请关闭它以免两个 Claude 同时写入同一会话。')}`;
   };
+  const budget = () => (state.kind === 'usage' ? config.maxAttempts : config.overloadMaxAttempts);
   let until = sleepUntil();
   state.nextTry = until;
   await writeAtomic(file, state);
 
-  while (state.attempts < config.maxAttempts) {
+  while (state.attempts < budget()) {
     while (Date.now() < until) {
       await pause(Math.min(CHUNK, until - Date.now()));
       if (!(await readJson(file))) return undefined;
@@ -240,7 +241,7 @@ export async function wait(session, config) {
     await log(`still blocked session=${session} kind=${kind || 'exit ' + result.code} next=${new Date(until).toISOString()}`);
   }
 
-  notify('TaskWake', t(`Stopped after ${config.maxAttempts} failed attempts. Reopen: claude --resume ${session}`, `连续失败 ${config.maxAttempts} 次后已停止。重新打开：claude --resume ${session}`), config);
+  notify('TaskWake', t(`Stopped after ${budget()} failed attempts. Reopen: claude --resume ${session}`, `连续失败 ${budget()} 次后已停止。重新打开：claude --resume ${session}`), config);
   return finish('gave-up');
 }
 

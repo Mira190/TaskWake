@@ -11,8 +11,9 @@ It does not bypass quota. It waits for the published reset, then continues
 headlessly; this also requires Agent SDK credit (see Cost policy).
 
 TaskWake automatically uses Simplified Chinese when the operating system locale starts
-with `zh`; every other locale uses English. This applies to the dashboard, CLI,
-notifications, and autonomous continuation prompts.
+with `zh`; every other locale uses English. This applies to the CLI, notifications, and
+autonomous continuation prompts; set `TASKWAKE_LANG=zh` (or `TASKWAKE_LANG=en`) to override
+the system locale. The dashboard follows the browser language.
 
 ## Install
 
@@ -67,9 +68,17 @@ Troubleshooting:
    the waiter re-parses the output, or probes again one `usagePollMs` later. Usage
    waiters share one account-level gate so several sessions never probe together.
    Overload / server errors are eligible immediately and retry on the short
-   `overloadMs` backoff instead.
+   `overloadMs` backoff instead, giving up after `overloadMaxAttempts` failures.
+   A successful probe is recognised from Claude's JSON result (`is_error: false`),
+   even if the answer itself mentions a rate limit.
 4. At the real reset deadline, the default `hybrid` mode opens the same session in
    a new native terminal when a desktop is available. Otherwise it resumes headlessly.
+   On Linux the terminal is `$TERMINAL`, then the first installed of
+   `x-terminal-emulator`, `gnome-terminal`, `konsole`, `xfce4-terminal`, `kitty`,
+   `alacritty`, `xterm`. Resumes reuse the session's permission mode (see
+   Configuration). If the original Claude terminal is still running, TaskWake resumes
+   anyway but warns you to close it so two Claudes do not write one transcript.
+   A new `StopFailure` for a session whose waiter died re-arms that waiter.
 5. Multi-session aware: `SessionStart` registers each Claude session and also repairs
    orphaned waiters. `SessionEnd` marks clean exits. On Windows the optional Task Scheduler
    entry repairs pending work after boot and every 5 minutes without login.
@@ -90,7 +99,8 @@ node bin/taskwake.js dashboard
 taskwake dashboard
 ```
 
-It listens only on `127.0.0.1:4178`, opens the default browser, and refreshes every
+It listens only on `127.0.0.1:4178`, rejects requests whose `Host` header is not that
+loopback address (DNS-rebinding guard), opens the default browser, and refreshes every
 2 seconds. It merges active Claude sessions, pending limit waiters, running headless
 continuations, Ralph turns, recent transcript tools/messages, and the TaskWake log.
 Pass another port as the first argument or use `--no-open` to keep the browser closed.
@@ -191,7 +201,7 @@ Optional config at `~/.taskwake.json`:
 | `claudeCmd`        | `["claude"]`                         |
 | `inheritPermissionMode` | `true` (`false` to resume without `--permission-mode`) |
 | `ralph`            | `false`                                |
-| `ralphMaxTurns`    | `20`                                   |
+| `ralphMaxTurns`    | `20` (effective limit is at most 8, see Ralph mode) |
 | `notify`           | `"toast"` (`"none"` to disable)      |
 
 Resumes inherit the interrupted session's permission mode. Headless `claude -p` denies
@@ -202,7 +212,18 @@ already set `--permission-mode`. This applies to visible terminals, headless pro
 the dashboard's **Open session**. A `bypassPermissions` session resumes with
 `bypassPermissions`. Set `"inheritPermissionMode": false` to opt out.
 
-State lives in `~/.taskwake/` (flat JSON files; delete the directory to reset).
+Environment variable `TASKWAKE_LANG`: `zh` forces Simplified Chinese, any other value
+forces English (default: the operating system locale).
+
+State lives in `~/.taskwake/` (flat JSON files; delete the directory to reset). Finished
+outcomes in `done/` keep the newest 100 records and drop ones older than 30 days.
+
+## Roadmap / not yet
+
+- Boot recovery on macOS (launchd) and Linux (systemd); only Windows has it today.
+- Interactive Codex sessions; only `taskwake run codex exec …` batch work is covered.
+- Verifying the outcome of the visible-terminal path; TaskWake records `opened`, not
+  whether the reopened session actually continued.
 
 ## Acknowledgements
 

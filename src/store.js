@@ -41,6 +41,7 @@ export async function loadConfig() {
     if (Number.isInteger(raw.overloadMaxAttempts) && raw.overloadMaxAttempts >= 1) config.overloadMaxAttempts = raw.overloadMaxAttempts;
     if (typeof raw.ralph === 'boolean') config.ralph = raw.ralph;
     if (typeof raw.inheritPermissionMode === 'boolean') config.inheritPermissionMode = raw.inheritPermissionMode;
+    if (typeof raw.inheritBypassPermissions === 'boolean') config.inheritBypassPermissions = raw.inheritBypassPermissions;
     if (Number.isInteger(raw.ralphMaxTurns) && raw.ralphMaxTurns > 0) config.ralphMaxTurns = raw.ralphMaxTurns;
     if (['notify', 'resume'].includes(raw.weeklyPolicy)) config.weeklyPolicy = raw.weeklyPolicy;
     if (['toast', 'none'].includes(raw.notify)) config.notify = raw.notify;
@@ -55,7 +56,8 @@ const inheritedModes = new Set(['acceptEdits', 'auto', 'dontAsk', 'bypassPermiss
 export function resumeArgv(config, session, registry) {
   const mode = registry?.permissionMode;
   const explicit = config.claudeCmd.some((arg) => arg === '--permission-mode' || arg.startsWith('--permission-mode='));
-  const inherit = config.inheritPermissionMode && inheritedModes.has(mode) && !explicit;
+  const bypassAllowed = mode !== 'bypassPermissions' || config.inheritBypassPermissions === true;
+  const inherit = config.inheritPermissionMode && inheritedModes.has(mode) && bypassAllowed && !explicit;
   return [...config.claudeCmd, '--resume', session, ...(inherit ? ['--permission-mode', mode] : [])];
 }
 

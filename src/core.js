@@ -17,6 +17,7 @@ export const defaults = Object.freeze({
   notify: 'toast',
   claudeCmd: ['claude'],
   inheritPermissionMode: true,
+  inheritBypassPermissions: false,
   ralph: false,
   ralphMaxTurns: 20,
 });

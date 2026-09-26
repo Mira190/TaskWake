@@ -200,6 +200,7 @@ Optional config at `~/.taskwake.json`:
 | `weeklyPolicy`     | `"notify"` (`"resume"` to auto-resume) |
 | `claudeCmd`        | `["claude"]`                         |
 | `inheritPermissionMode` | `true` (`false` to resume without `--permission-mode`) |
+| `inheritBypassPermissions` | `false` (explicit opt-in for unattended `bypassPermissions`) |
 | `ralph`            | `false`                                |
 | `ralphMaxTurns`    | `20` (effective limit is at most 8, see Ralph mode) |
 | `notify`           | `"toast"` (`"none"` to disable)      |
@@ -207,11 +208,11 @@ Optional config at `~/.taskwake.json`:
 Resumes inherit the interrupted session's permission mode. Headless `claude -p` denies
 every tool that needs permission unless a mode is given, so TaskWake adds
 `--permission-mode <mode>` from the session registry when the session ran in
-`acceptEdits`, `auto`, `dontAsk`, or `bypassPermissions` (not `plan`, which cannot make
-progress headlessly) and `claudeCmd` does not
-already set `--permission-mode`. This applies to visible terminals, headless probes, and
-the dashboard's **Open session**. A `bypassPermissions` session resumes with
-`bypassPermissions`. Set `"inheritPermissionMode": false` to opt out.
+`acceptEdits`, `auto`, or `dontAsk` (not `plan`, which cannot make progress headlessly)
+and `claudeCmd` does not already set `--permission-mode`. This applies to visible terminals,
+headless probes, and the dashboard's **Open session**. `bypassPermissions` is deliberately
+not inherited for an unattended resume unless `"inheritBypassPermissions": true` is set.
+Set `"inheritPermissionMode": false` to disable permission-mode inheritance entirely.
 
 Environment variable `TASKWAKE_LANG`: `zh` forces Simplified Chinese, any other value
 forces English (default: the operating system locale).

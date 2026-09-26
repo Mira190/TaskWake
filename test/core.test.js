@@ -54,9 +54,10 @@ describe('headless probe evaluation', () => {
 
 describe('permission mode inheritance', () => {
   it('resumes with the registered mode unless disabled or already configured', () => {
-    const config = { claudeCmd: ['claude'], inheritPermissionMode: true };
+    const config = { claudeCmd: ['claude'], inheritPermissionMode: true, inheritBypassPermissions: false };
     assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'acceptEdits' }), ['claude', '--resume', 's1', '--permission-mode', 'acceptEdits']);
-    assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'bypassPermissions' }).slice(-1), ['bypassPermissions']);
+    assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'bypassPermissions' }), ['claude', '--resume', 's1']);
+    assert.deepEqual(resumeArgv({ ...config, inheritBypassPermissions: true }, 's1', { permissionMode: 'bypassPermissions' }).slice(-1), ['bypassPermissions']);
     assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'default' }), ['claude', '--resume', 's1']);
     assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'plan' }), ['claude', '--resume', 's1'], 'plan cannot work headlessly');
     assert.deepEqual(resumeArgv(config, 's1', { permissionMode: 'weird; rm -rf' }), ['claude', '--resume', 's1']);
